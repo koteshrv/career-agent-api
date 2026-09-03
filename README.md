@@ -23,7 +23,9 @@ Create the remote D1 database:
 ```bash
 npm run db:init
 ```
-**Important:** The command above will output a `database_id`. Open `wrangler.toml` and replace the placeholder `database_id` value with the one you just received.
+**Important:** The command above will output a `database_id`. Create a copy of `wrangler.toml` named `wrangler.prod.toml` (this is ignored by Git to keep your secrets safe). Paste your real `database_id` into `wrangler.prod.toml`. Keep the dummy ID in the public `wrangler.toml`!
+
+Also, make sure to change the `JWT_SECRET` in `wrangler.prod.toml` to a highly secure, random string!
 
 ### 4. Run Migrations
 Run the schema setup locally (for development):
@@ -31,9 +33,9 @@ Run the schema setup locally (for development):
 npm run db:migrate
 ```
 
-Run the schema setup remotely (for production):
+Run the schema setup remotely (for production). Notice we use the prod config here:
 ```bash
-npm run db:migrate:remote
+npx wrangler d1 execute career-agent-db --remote --file=./schema.sql --config wrangler.prod.toml
 ```
 
 ### 5. Local Development
@@ -50,7 +52,7 @@ The API will be available at `http://localhost:8787`.
 Before deploying to Cloudflare, you can test the API locally. Make sure your local server is running (`npm run dev`) in a separate terminal.
 
 **1. Login & Get a JWT**
-Run this `curl` command to simulate a frontend sending SSO details to the API:
+Run this `curl` command to simulate a frontend sending an IdP token to the API:
 ```bash
 curl -X POST http://localhost:8787/api/auth/login \
   -H "Content-Type: application/json" \
@@ -80,9 +82,9 @@ curl -X GET "http://localhost:8787/api/jobs/pull?limit=5" \
 
 ## Deployment
 
-Once you are satisfied with local testing, deploy the API to Cloudflare Workers globally:
+Once you are satisfied with local testing, deploy the API to Cloudflare Workers globally using your hidden production config:
 ```bash
-npm run deploy
+npm run deploy -- --config wrangler.prod.toml
 ```
 
 ---
@@ -92,8 +94,9 @@ npm run deploy
 ### Auth (SSO Login)
 
 1. **`POST /api/auth/login`**
-   - The frontend handles the SSO flow (e.g. Google/GitHub OAuth) and sends the user details here.
-   - Body: `{ "email": "user@example.com", "sso_provider": "github" }`
+   - The frontend handles the SSO flow (e.g. Google/GitHub OAuth) and sends the resulting token here.
+   - Body: `{ "idp_token": "eyJhbG...", "sso_provider": "github" }`
+   - The backend cryptographically validates the token against the IdP.
    - Returns a JWT `access_token` that should be used in the `Authorization` header for subsequent requests.
 
 ### Jobs Economy (Requires `Authorization: Bearer <JWT>`)

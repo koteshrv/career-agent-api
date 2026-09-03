@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { sign, verify } from 'hono/jwt';
+import { cors } from 'hono/cors';
 
 /**
  * Cloudflare Worker Bindings
@@ -25,6 +26,18 @@ type Variables = {
  * Initialize the Hono application with strict typing for bindings and variables.
  */
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+
+/**
+ * --- CORS Configuration ---
+ * Restricts the API so it only accepts requests from your official frontend.
+ * (Change the origin to your production frontend URL when deployed!)
+ */
+app.use('*', cors({
+  origin: ['http://localhost:5173'],
+  allowHeaders: ['Content-Type', 'Authorization'],
+  allowMethods: ['POST', 'GET', 'OPTIONS'],
+  maxAge: 600,
+}));
 
 /**
  * --- Rate Limiting Middleware ---
@@ -97,8 +110,6 @@ const authMiddleware = async (c: any, next: any) => {
 };
 
 // --- API Routes ---
-
-app.get('/', (c) => c.text('Career Agent API is running!'));
 
 /**
  * POST /api/auth/login

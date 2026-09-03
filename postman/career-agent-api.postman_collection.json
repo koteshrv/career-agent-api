@@ -33,7 +33,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n    \"email\": \"test@example.com\",\n    \"sso_provider\": \"github\"\n}"
+          "raw": "{\n    \"idp_token\": \"PASTE_REAL_TOKEN_HERE\",\n    \"sso_provider\": \"github\"\n}"
         },
         "url": {
           "raw": "{{base_url}}/api/auth/login",

@@ -54,7 +54,7 @@ Run this `curl` command to simulate a frontend sending SSO details to the API:
 ```bash
 curl -X POST http://localhost:8787/api/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"email": "test@example.com", "sso_provider": "github"}'
+  -d '{"idp_token": "YOUR_REAL_GOOGLE_OR_GITHUB_TOKEN", "sso_provider": "github"}'
 ```
 *Copy the `access_token` from the response. You will use it in the next commands.*
 

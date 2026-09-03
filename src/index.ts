@@ -107,10 +107,54 @@ app.get('/', (c) => c.text('Career Agent API is running!'));
  * issuing the internal API JWT.
  */
 app.post('/api/auth/login', async (c) => {
-  const { email, sso_provider } = await c.req.json();
+  const { idp_token, sso_provider } = await c.req.json();
 
-  if (!email || !sso_provider) {
-    return c.json({ error: 'Missing email or sso_provider' }, 400);
+  if (!idp_token || !sso_provider) {
+    return c.json({ error: 'Missing idp_token or sso_provider' }, 400);
+  }
+
+  let email: string | null = null;
+
+  try {
+    if (sso_provider === 'google') {
+      // Validate Google ID Token against Google's TokenInfo endpoint
+      const res = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${idp_token}`);
+      if (!res.ok) throw new Error('Invalid Google token');
+      const data = (await res.json()) as any;
+      email = data.email;
+    } else if (sso_provider === 'github') {
+      // Validate GitHub Access Token by fetching the user's profile
+      const res = await fetch('https://api.github.com/user', {
+        headers: {
+          Authorization: `Bearer ${idp_token}`,
+          'User-Agent': 'Career-Agent-API'
+        }
+      });
+      if (!res.ok) throw new Error('Invalid GitHub token');
+      const data = (await res.json()) as any;
+      
+      // GitHub sometimes hides the primary email, so we explicitly fetch their emails
+      if (!data.email) {
+        const emailRes = await fetch('https://api.github.com/user/emails', {
+          headers: { 
+            Authorization: `Bearer ${idp_token}`, 
+            'User-Agent': 'Career-Agent-API' 
+          }
+        });
+        const emails = (await emailRes.json()) as any[];
+        email = emails.find((e) => e.primary)?.email || emails[0]?.email;
+      } else {
+        email = data.email;
+      }
+    } else {
+      return c.json({ error: 'Unsupported SSO provider (Only Google/GitHub supported)' }, 400);
+    }
+  } catch (err) {
+    return c.json({ error: 'Identity Provider verification failed. Token invalid.' }, 401);
+  }
+
+  if (!email) {
+    return c.json({ error: 'Failed to extract email from Identity Provider' }, 400);
   }
 
   let user = await c.env.DB.prepare('SELECT * FROM users WHERE email = ?')

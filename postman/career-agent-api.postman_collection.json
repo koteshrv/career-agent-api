@@ -1,0 +1,143 @@
+{
+  "info": {
+    "name": "Career Agent API",
+    "description": "Postman collection for testing the Career Agent API locally.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "1. SSO Login",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "var jsonData = pm.response.json();",
+              "if (jsonData.access_token) {",
+              "    pm.collectionVariables.set(\"jwt_token\", jsonData.access_token);",
+              "    console.log(\"JWT Token saved to collection variables!\");",
+              "}"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n    \"email\": \"test@example.com\",\n    \"sso_provider\": \"github\"\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/auth/login",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "auth",
+            "login"
+          ]
+        },
+        "description": "Simulates the frontend sending SSO details. Automatically saves the returned JWT to a collection variable."
+      },
+      "response": []
+    },
+    {
+      "name": "2. Push Jobs (Give to Get)",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{jwt_token}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n    \"jobs\": [\n        {\n            \"company\": \"TechCorp\",\n            \"title\": \"Software Engineer\",\n            \"location\": \"Remote\",\n            \"url\": \"https://techcorp.com/jobs/1\"\n        },\n        {\n            \"company\": \"InnoSys\",\n            \"title\": \"Frontend Developer\",\n            \"location\": \"New York, NY\",\n            \"url\": \"https://innosys.com/jobs/2\"\n        }\n    ]\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/jobs/push",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "jobs",
+            "push"
+          ]
+        },
+        "description": "Uploads scraped jobs and earns credits. Requires JWT token."
+      },
+      "response": []
+    },
+    {
+      "name": "3. Pull Jobs (Consume)",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{jwt_token}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/jobs/pull?limit=5",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "jobs",
+            "pull"
+          ],
+          "query": [
+            {
+              "key": "limit",
+              "value": "5"
+            }
+          ]
+        },
+        "description": "Pulls the latest jobs and deducts credits. Requires JWT token."
+      },
+      "response": []
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8787",
+      "type": "string"
+    },
+    {
+      "key": "jwt_token",
+      "value": "",
+      "type": "string"
+    }
+  ]
+}
+

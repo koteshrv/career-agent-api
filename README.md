@@ -24,7 +24,6 @@ Create the remote D1 database:
 npm run db:init
 ```
 **Important:** The command above will output a `database_id`. Open `wrangler.toml` and replace the placeholder `database_id` value with the one you just received.
-**Important:** The command above will output a `database_id`. Open `wrangler.prod.toml` (create this file by copying `wrangler.toml` if you haven't already) and paste your real `database_id` there. Keep the dummy ID in the public `wrangler.toml`!
 
 ### 4. Run Migrations
 Run the schema setup locally (for development):
@@ -33,10 +32,8 @@ npm run db:migrate
 ```
 
 Run the schema setup remotely (for production):
-Run the schema setup remotely (for production). Notice we use the prod config here:
 ```bash
 npm run db:migrate:remote
-npx wrangler d1 execute career-agent-db --remote --file=./schema.sql --config wrangler.prod.toml
 ```
 
 ### 5. Local Development
@@ -84,10 +81,8 @@ curl -X GET "http://localhost:8787/api/jobs/pull?limit=5" \
 ## Deployment
 
 Once you are satisfied with local testing, deploy the API to Cloudflare Workers globally:
-Once you are satisfied with local testing, deploy the API to Cloudflare Workers globally using your hidden production config:
 ```bash
 npm run deploy
-npm run deploy -- --config wrangler.prod.toml
 ```
 
 ---

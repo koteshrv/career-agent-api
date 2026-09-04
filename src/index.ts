@@ -7,8 +7,10 @@ import { cors } from 'hono/cors';
  * Defines the environment variables and resources available to the Worker.
  */
 type Bindings = {
-  DB: D1Database;      // Cloudflare D1 Serverless SQLite Database
-  JWT_SECRET: string;  // Secret key used to sign and verify JWTs
+  DB: D1Database;           // Cloudflare D1 Serverless SQLite Database
+  JWT_SECRET: string;       // Secret key used to sign and verify JWTs
+  GOOGLE_CLIENT_ID: string; // OAuth client ID this API accepts Google ID tokens for (audience check)
+  ALLOWED_ORIGIN?: string;  // Comma-separated list of allowed CORS origins (defaults to local dev)
 };
 
 /**
@@ -29,11 +31,17 @@ const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
 /**
  * --- CORS Configuration ---
- * Restricts the API so it only accepts requests from your official frontend.
- * (Change the origin to your production frontend URL when deployed!)
+ * Restricts the API so it only accepts requests from your official frontend(s).
+ * Reads from the ALLOWED_ORIGIN binding (comma-separated) so prod/dev frontends
+ * can differ without a code change; defaults to the local dev frontend.
  */
 app.use('*', cors({
-  origin: ['http://localhost:5173'],
+  origin: (origin, c) => {
+    const allowed = (c.env.ALLOWED_ORIGIN || 'http://localhost:5173')
+      .split(',')
+      .map((o: string) => o.trim());
+    return origin && allowed.includes(origin) ? origin : allowed[0];
+  },
   allowHeaders: ['Content-Type', 'Authorization'],
   allowMethods: ['POST', 'GET', 'OPTIONS'],
   maxAge: 600,
@@ -46,6 +54,7 @@ app.use('*', cors({
  * as in-memory state is not shared across different Cloudflare Edge nodes.
  */
 const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
+const RATE_LIMIT_PRUNE_THRESHOLD = 10000;
 
 app.use('*', async (c, next) => {
   const ip = c.req.header('cf-connecting-ip') || 'unknown';
@@ -57,6 +66,14 @@ app.use('*', async (c, next) => {
   if (!record || record.resetTime < now) {
     // Initialize or reset the window for this IP
     rateLimitMap.set(ip, { count: 1, resetTime: now + windowMs });
+
+    // Bound memory: an isolate that sees many unique IPs would otherwise
+    // accumulate stale entries forever since they're never evicted on their own.
+    if (rateLimitMap.size > RATE_LIMIT_PRUNE_THRESHOLD) {
+      for (const [key, entry] of rateLimitMap) {
+        if (entry.resetTime < now) rateLimitMap.delete(key);
+      }
+    }
   } else {
     // Increment and check limits
     record.count++;
@@ -64,7 +81,7 @@ app.use('*', async (c, next) => {
       return c.json({ error: 'Too Many Requests' }, 429);
     }
   }
-  
+
   await next();
 });
 
@@ -118,10 +135,20 @@ const authMiddleware = async (c: any, next: any) => {
  * issuing the internal API JWT.
  */
 app.post('/api/auth/login', async (c) => {
-  const { idp_token, sso_provider } = await c.req.json();
+  let body: any;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+  const { idp_token, sso_provider } = body;
 
   if (!idp_token || !sso_provider) {
     return c.json({ error: 'Missing idp_token or sso_provider' }, 400);
+  }
+
+  if (sso_provider === 'google' && !c.env.GOOGLE_CLIENT_ID) {
+    return c.json({ error: 'Server misconfiguration: GOOGLE_CLIENT_ID not set' }, 500);
   }
 
   let email: string | null = null;
@@ -132,6 +159,12 @@ app.post('/api/auth/login', async (c) => {
       const res = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${idp_token}`);
       if (!res.ok) throw new Error('Invalid Google token');
       const data = (await res.json()) as any;
+      // The tokeninfo endpoint proves the token is *a* valid Google-signed token,
+      // not that it was issued for THIS app — without checking `aud`, a token
+      // minted for any other Google-sign-in-enabled site would be accepted here.
+      if (data.aud !== c.env.GOOGLE_CLIENT_ID) {
+        throw new Error('Token audience mismatch');
+      }
       email = data.email;
     } else if (sso_provider === 'github') {
       // Validate GitHub Access Token by fetching the user's profile
@@ -203,9 +236,10 @@ app.post('/api/auth/login', async (c) => {
 });
 
 /**
- * Apply the Authentication Middleware to all Job Economy routes
+ * Apply the Authentication Middleware to all Job Economy routes and the account endpoint
  */
 app.use('/api/jobs/*', authMiddleware);
+app.use('/api/me', authMiddleware);
 
 /**
  * POST /api/jobs/push
@@ -214,7 +248,13 @@ app.use('/api/jobs/*', authMiddleware);
  */
 app.post('/api/jobs/push', async (c) => {
   const user = c.get('user');
-  const { jobs } = await c.req.json();
+  let body: any;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+  const { jobs } = body;
 
   if (!jobs || !Array.isArray(jobs)) {
     return c.json({ error: 'Invalid payload, expected array of jobs' }, 400);
@@ -225,7 +265,24 @@ app.post('/api/jobs/push', async (c) => {
     return c.json({ error: 'Payload too large. Maximum 1000 jobs allowed per request.' }, 413);
   }
 
+  const isNonEmptyString = (v: unknown): v is string => typeof v === 'string' && v.trim().length > 0;
+
+  // Filter out malformed entries up front. Without this, a single job missing a
+  // required NOT NULL column fails the whole chunk's batch transaction below,
+  // costing every valid job in that chunk its credit.
+  const validJobs = jobs.filter(
+    (job) =>
+      job &&
+      typeof job === 'object' &&
+      isNonEmptyString(job.company) &&
+      isNonEmptyString(job.title) &&
+      isNonEmptyString(job.url) &&
+      (job.location === undefined || job.location === null || typeof job.location === 'string')
+  );
+  const invalidSkipped = jobs.length - validJobs.length;
+
   let creditsEarned = 0;
+  let failed = 0;
 
   // Utilize D1 Batch API to execute multiple inserts in a single network transaction
   const stmts = [];
@@ -234,32 +291,33 @@ app.post('/api/jobs/push', async (c) => {
     'INSERT OR IGNORE INTO jobs (id, company, title, location, url, scraped_by_user_id) VALUES (?, ?, ?, ?, ?, ?)'
   );
 
-  for (const job of jobs) {
+  for (const job of validJobs) {
     const jobId = crypto.randomUUID();
     stmts.push(
-      insertJobStmt.bind(jobId, job.company, job.title, job.location, job.url, user.id)
+      insertJobStmt.bind(jobId, job.company, job.title, job.location ?? null, job.url, user.id)
     );
   }
 
   if (stmts.length > 0) {
-    const results = await c.env.DB.batch(stmts);
-    
-    // Tally up credits based on how many rows were actually written (ignoring duplicates)
-    for (const result of results) {
-      if (result.meta.changes > 0) {
-        creditsEarned++;
     // Cloudflare D1 restricts batch calls to 100 statements maximum.
     // We slice the massive array into chunks of 100 and execute them sequentially.
     const CHUNK_SIZE = 100;
     for (let i = 0; i < stmts.length; i += CHUNK_SIZE) {
       const chunk = stmts.slice(i, i + CHUNK_SIZE);
-      const results = await c.env.DB.batch(chunk);
-      
-      // Tally up credits based on how many rows were actually written (ignoring duplicates)
-      for (const result of results) {
-        if (result.meta.changes > 0) {
-          creditsEarned++;
+      try {
+        const results = await c.env.DB.batch(chunk);
+
+        // Tally up credits based on how many rows were actually written (ignoring duplicates)
+        for (const result of results) {
+          if (result.meta.changes > 0) {
+            creditsEarned++;
+          }
         }
+      } catch (err) {
+        // A chunk is one atomic D1 transaction: if it throws for any reason,
+        // none of its rows were written. Don't let that abort the whole request
+        // and lose the credit already earned by prior successful chunks.
+        failed += chunk.length;
       }
     }
   }
@@ -277,6 +335,8 @@ app.post('/api/jobs/push', async (c) => {
     success: true,
     message: `Pushed ${jobs.length} jobs.`,
     credits_earned: creditsEarned,
+    invalid_skipped: invalidSkipped,
+    failed,
   });
 });
 
@@ -288,11 +348,172 @@ app.post('/api/jobs/push', async (c) => {
 app.get('/api/jobs/pull', async (c) => {
   const user = c.get('user');
   const limitParam = parseInt(c.req.query('limit') || '10', 10);
+  if (!Number.isFinite(limitParam)) {
+    return c.json({ error: 'Invalid limit parameter' }, 400);
+  }
   const limit = Math.min(Math.max(limitParam, 1), 100);
+  const today = new Date().toISOString().split('T')[0];
+  const DAILY_QUOTA = 50;
 
-  // Retrieve current economy state for the user
+  type Reservation = { want: number; fromCredits: boolean; warningMessage?: string };
+  let reservation: Reservation | null = null;
+
+  // Read-modify-write on credits/quota is racy under concurrent requests from the
+  // same user, so each attempt "reserves" its slice with a single conditional
+  // UPDATE guarded by the precondition (current_credits >= want, or the quota not
+  // being exceeded). If another concurrent request wins the row first, the guard
+  // fails (0 rows changed) and we retry with freshly-read state instead of
+  // overspending credits or double-spending the daily quota.
+  for (let attempt = 0; attempt < 3 && !reservation; attempt++) {
+    const userData = await c.env.DB.prepare(
+      'SELECT current_credits, pulled_today, last_pull_date FROM users WHERE id = ?'
+    )
+      .bind(user.id)
+      .first();
+
+    if (!userData) {
+      return c.json({ error: 'User not found' }, 404);
+    }
+
+    const credits = userData.current_credits as number;
+    const pulledToday =
+      userData.last_pull_date === today ? (userData.pulled_today as number) : 0;
+
+    if (credits > 0) {
+      // Contributor State: limit by their requested amount or remaining credits
+      const want = Math.min(limit, credits);
+      let warningMessage: string | undefined;
+      if (limitParam > credits) {
+        warningMessage = `Requested ${limitParam} jobs but limited to ${credits} due to your current credit balance.`;
+      } else if (limitParam > 100) {
+        warningMessage = `Requested ${limitParam} jobs but capped at the hard limit of 100 jobs per request.`;
+      }
+
+      const result = await c.env.DB.prepare(
+        `UPDATE users
+         SET current_credits = current_credits - ?,
+             pulled_today = CASE WHEN last_pull_date = ? THEN pulled_today + ? ELSE ? END,
+             last_pull_date = ?
+         WHERE id = ? AND current_credits >= ?`
+      )
+        .bind(want, today, want, want, today, user.id, want)
+        .run();
+
+      if (result.meta.changes > 0) {
+        reservation = { want, fromCredits: true, warningMessage };
+      }
+      // else: credits changed concurrently between our read and write — retry
+    } else {
+      // Freerider State: blocked once the daily free quota is exhausted
+      if (pulledToday >= DAILY_QUOTA) {
+        return c.json(
+          { error: 'Daily quota exceeded. Push more jobs to earn credits.' },
+          403
+        );
+      }
+      const want = Math.min(limit, DAILY_QUOTA - pulledToday);
+      const warningMessage =
+        limitParam > want
+          ? `Requested ${limitParam} jobs but limited to ${want} due to your remaining daily free quota.`
+          : undefined;
+
+      const result = await c.env.DB.prepare(
+        `UPDATE users
+         SET pulled_today = CASE WHEN last_pull_date = ? THEN pulled_today + ? ELSE ? END,
+             last_pull_date = ?
+         WHERE id = ?
+           AND (CASE WHEN last_pull_date = ? THEN pulled_today ELSE 0 END) + ? <= ?`
+      )
+        .bind(today, want, want, today, user.id, today, want, DAILY_QUOTA)
+        .run();
+
+      if (result.meta.changes > 0) {
+        reservation = { want, fromCredits: false, warningMessage };
+      }
+    }
+  }
+
+  if (!reservation) {
+    return c.json(
+      { error: 'Could not process pull request due to concurrent updates, please retry.' },
+      409
+    );
+  }
+
+  // Exclude jobs this user has already pulled before so consuming the feed
+  // actually advances instead of handing back the same newest N jobs forever.
+  const candidates = await c.env.DB.prepare(
+    `SELECT id, company, title, location, url, created_at FROM jobs
+     WHERE id NOT IN (SELECT job_id FROM pulled_jobs WHERE user_id = ?)
+     ORDER BY created_at DESC LIMIT ?`
+  )
+    .bind(user.id, reservation.want)
+    .all();
+
+  // Claim each candidate via INSERT OR IGNORE on the (user_id, job_id) primary
+  // key *before* trusting it as delivered. Two concurrent requests for the same
+  // user can both select the same candidate (neither has claimed it yet at
+  // SELECT time) — only one INSERT wins the PK race, so only the winner keeps
+  // that job. This is what actually prevents the same job being handed out
+  // twice, not the SELECT filter above (which only stops *already-committed*
+  // pulls from being re-served).
+  let confirmed: any[] = [];
+  if (candidates.results.length > 0) {
+    const markSeenStmt = c.env.DB.prepare(
+      'INSERT OR IGNORE INTO pulled_jobs (user_id, job_id) VALUES (?, ?)'
+    );
+    const claimResults = await c.env.DB.batch(
+      candidates.results.map((job: any) => markSeenStmt.bind(user.id, job.id))
+    );
+    confirmed = candidates.results.filter((_: any, i: number) => claimResults[i].meta.changes > 0);
+  }
+
+  const jobsReturnedCount = confirmed.length;
+  const unused = reservation.want - jobsReturnedCount;
+
+  // Refund whatever portion of the reservation couldn't be fulfilled (e.g. the
+  // shared pool ran dry, was already fully seen, or was lost to a concurrent
+  // claim above), so users aren't charged for jobs they didn't actually receive.
+  if (unused > 0) {
+    if (reservation.fromCredits) {
+      await c.env.DB.prepare(
+        'UPDATE users SET current_credits = current_credits + ?, pulled_today = pulled_today - ? WHERE id = ?'
+      )
+        .bind(unused, unused, user.id)
+        .run();
+    } else {
+      await c.env.DB.prepare(
+        'UPDATE users SET pulled_today = pulled_today - ? WHERE id = ?'
+      )
+        .bind(unused, user.id)
+        .run();
+    }
+  }
+
+  if (jobsReturnedCount > 0) {
+    await c.env.DB.prepare('UPDATE users SET total_pulled = total_pulled + ? WHERE id = ?')
+      .bind(jobsReturnedCount, user.id)
+      .run();
+  }
+
+  return c.json({
+    success: true,
+    warning: reservation.warningMessage,
+    jobs: confirmed,
+    deducted: reservation.fromCredits ? jobsReturnedCount : 0,
+    quota_used: reservation.fromCredits ? 0 : jobsReturnedCount,
+  });
+});
+
+/**
+ * GET /api/me
+ * Returns the authenticated user's current Give-to-Get economy balance and stats.
+ */
+app.get('/api/me', async (c) => {
+  const user = c.get('user');
+
   const userData = await c.env.DB.prepare(
-    'SELECT current_credits, pulled_today, last_pull_date FROM users WHERE id = ?'
+    'SELECT id, email, current_credits, total_pushed, total_pulled, pulled_today, last_pull_date FROM users WHERE id = ?'
   )
     .bind(user.id)
     .first();
@@ -301,79 +522,28 @@ app.get('/api/jobs/pull', async (c) => {
     return c.json({ error: 'User not found' }, 404);
   }
 
-  let credits = userData.current_credits as number;
-  let pulledToday = userData.pulled_today as number;
-  let lastPullDate = userData.last_pull_date as string | null;
-  
   const today = new Date().toISOString().split('T')[0];
-
-  // Reset daily free quota tracker if a new day has started
-  if (lastPullDate !== today) {
-    pulledToday = 0;
-    lastPullDate = today;
-  }
-
   const DAILY_QUOTA = 50;
-  let maxJobsToPull = limit;
-  let warningMessage: string | undefined;
-
-  // Economy Enforcement
-  if (credits <= 0) {
-    // Freerider State: Block request if daily free quota is exhausted
-    if (pulledToday >= DAILY_QUOTA) {
-      return c.json({ 
-        error: 'Daily quota exceeded. Push more jobs to earn credits.' 
-      }, 403);
-    }
-    // Cap the request limit to whatever free quota is remaining today
-    maxJobsToPull = Math.min(limit, DAILY_QUOTA - pulledToday);
-    if (limitParam > maxJobsToPull) {
-      warningMessage = `Requested ${limitParam} jobs but limited to ${maxJobsToPull} due to remaining daily free quota.`;
-    }
-  } else {
-    // Contributor State: Limit by their requested amount or their remaining positive credits
-    maxJobsToPull = Math.min(limit, credits);
-    if (limitParam > credits) {
-      warningMessage = `Requested ${limitParam} jobs but limited to ${credits} due to your current credit balance.`;
-    } else if (limitParam > 100) {
-      warningMessage = `Requested ${limitParam} jobs but capped at the hard limit of 100 jobs per request.`;
-    }
-  }
-
-  // Fetch jobs from the database
-  const jobs = await c.env.DB.prepare(
-    'SELECT id, company, title, location, url, created_at FROM jobs ORDER BY created_at DESC LIMIT ?'
-  )
-    .bind(maxJobsToPull)
-    .all();
-
-  const jobsReturnedCount = jobs.results.length;
-
-  if (jobsReturnedCount > 0) {
-    if (credits > 0) {
-      // Deduct credits and update usage stats
-      await c.env.DB.prepare(
-        'UPDATE users SET current_credits = current_credits - ?, total_pulled = total_pulled + ?, pulled_today = ?, last_pull_date = ? WHERE id = ?'
-      )
-        .bind(jobsReturnedCount, jobsReturnedCount, pulledToday + jobsReturnedCount, today, user.id)
-        .run();
-    } else {
-      // User is on the free tier; only update usage stats (do not create negative credits)
-      await c.env.DB.prepare(
-        'UPDATE users SET total_pulled = total_pulled + ?, pulled_today = ?, last_pull_date = ? WHERE id = ?'
-      )
-        .bind(jobsReturnedCount, pulledToday + jobsReturnedCount, today, user.id)
-        .run();
-    }
-  }
+  const pulledToday = userData.last_pull_date === today ? (userData.pulled_today as number) : 0;
 
   return c.json({
-    success: true,
-    warning: warningMessage,
-    jobs: jobs.results,
-    deducted: credits > 0 ? jobsReturnedCount : 0,
-    quota_used: credits <= 0 ? jobsReturnedCount : 0
+    id: userData.id,
+    email: userData.email,
+    current_credits: userData.current_credits,
+    total_pushed: userData.total_pushed,
+    total_pulled: userData.total_pulled,
+    daily_quota_remaining: Math.max(0, DAILY_QUOTA - pulledToday),
   });
+});
+
+/**
+ * --- Global Error Handler ---
+ * Safety net for unexpected exceptions (e.g. D1 errors) so clients always get
+ * clean JSON instead of Hono's default error response.
+ */
+app.onError((err, c) => {
+  console.error(err);
+  return c.json({ error: 'Internal server error' }, 500);
 });
 
 export default app;

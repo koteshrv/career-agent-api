@@ -22,8 +22,8 @@ components:
       required:
         - company
         - title
-        - location
         - url
+      description: Entries missing company, title, or url are silently skipped (see invalid_skipped in the push response); location is optional.
       properties:
         company:
           type: string
@@ -137,8 +137,16 @@ paths:
                   credits_earned:
                     type: integer
                     example: 5
+                  invalid_skipped:
+                    type: integer
+                    description: Number of submitted entries skipped for missing/invalid required fields.
+                    example: 0
+                  failed:
+                    type: integer
+                    description: Number of entries that could not be inserted due to an unexpected database error.
+                    example: 0
         '400':
-          description: Invalid payload
+          description: Invalid payload or malformed JSON body
         '401':
           description: Unauthorized (Missing or Invalid JWT)
         '413':
@@ -147,7 +155,7 @@ paths:
   /api/jobs/pull:
     get:
       summary: Pull Jobs
-      description: Consume jobs from the database. Deducts 1 API credit per job. Falls back to a strict daily quota (50 jobs/day) if credits are 0.
+      description: Consume jobs from the database. Deducts 1 API credit per job. Falls back to a strict daily quota (50 jobs/day) if credits are 0. Each user is only ever served a given job once — already-pulled jobs are excluded from future pulls.
       parameters:
         - in: query
           name: limit
@@ -185,4 +193,35 @@ paths:
           description: Unauthorized (Missing or Invalid JWT)
         '403':
           description: Forbidden (Daily free quota exhausted)
+        '409':
+          description: Conflict (lost a race with a concurrent pull request from the same user); safe to retry
+
+  /api/me:
+    get:
+      summary: Get Account Info
+      description: Returns the authenticated user's current Give-to-Get economy balance and stats.
+      responses:
+        '200':
+          description: Account info retrieved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  email:
+                    type: string
+                  current_credits:
+                    type: integer
+                  total_pushed:
+                    type: integer
+                  total_pulled:
+                    type: integer
+                  daily_quota_remaining:
+                    type: integer
+                    description: Remaining free-tier jobs pullable today (resets daily; only relevant once credits reach 0).
+        '401':
+          description: Unauthorized (Missing or Invalid JWT)
 

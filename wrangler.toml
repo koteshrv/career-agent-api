@@ -4,8 +4,16 @@ main = "src/index.ts"
 
 [vars]
 JWT_SECRET = "super-secret-key-change-in-production"
+GITHUB_CLIENT_ID = "YOUR_GITHUB_CLIENT_ID"
+GITHUB_CLIENT_SECRET = "YOUR_GITHUB_CLIENT_SECRET"
+# Your Google OAuth Client ID — required so /api/auth/login can verify that a
+# Google ID token was actually issued for THIS app (the `aud` claim), not some
+# unrelated site. Get it from console.cloud.google.com > APIs & Services > Credentials.
+GOOGLE_CLIENT_ID = "YOUR_GOOGLE_CLIENT_ID"
+# Comma-separated list of frontend origins allowed to call this API via CORS.
+ALLOWED_ORIGIN = "http://localhost:5173"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "career-agent-db"
-database_id = "local-dev-only-dummy-id" # Required field, but only used for local dev. Real ID goes in wrangler.prod.toml
+database_id = "local-dev-only-dummy-id"

@@ -220,6 +220,11 @@ app.post('/api/jobs/push', async (c) => {
     return c.json({ error: 'Invalid payload, expected array of jobs' }, 400);
   }
 
+  // Prevent CPU and memory exhaustion on the Cloudflare Free Tier Worker
+  if (jobs.length > 1000) {
+    return c.json({ error: 'Payload too large. Maximum 1000 jobs allowed per request.' }, 413);
+  }
+
   let creditsEarned = 0;
 
   // Utilize D1 Batch API to execute multiple inserts in a single network transaction
@@ -243,6 +248,18 @@ app.post('/api/jobs/push', async (c) => {
     for (const result of results) {
       if (result.meta.changes > 0) {
         creditsEarned++;
+    // Cloudflare D1 restricts batch calls to 100 statements maximum.
+    // We slice the massive array into chunks of 100 and execute them sequentially.
+    const CHUNK_SIZE = 100;
+    for (let i = 0; i < stmts.length; i += CHUNK_SIZE) {
+      const chunk = stmts.slice(i, i + CHUNK_SIZE);
+      const results = await c.env.DB.batch(chunk);
+      
+      // Tally up credits based on how many rows were actually written (ignoring duplicates)
+      for (const result of results) {
+        if (result.meta.changes > 0) {
+          creditsEarned++;
+        }
       }
     }
   }
@@ -298,6 +315,7 @@ app.get('/api/jobs/pull', async (c) => {
 
   const DAILY_QUOTA = 50;
   let maxJobsToPull = limit;
+  let warningMessage: string | undefined;
 
   // Economy Enforcement
   if (credits <= 0) {
@@ -309,9 +327,17 @@ app.get('/api/jobs/pull', async (c) => {
     }
     // Cap the request limit to whatever free quota is remaining today
     maxJobsToPull = Math.min(limit, DAILY_QUOTA - pulledToday);
+    if (limitParam > maxJobsToPull) {
+      warningMessage = `Requested ${limitParam} jobs but limited to ${maxJobsToPull} due to remaining daily free quota.`;
+    }
   } else {
     // Contributor State: Limit by their requested amount or their remaining positive credits
     maxJobsToPull = Math.min(limit, credits);
+    if (limitParam > credits) {
+      warningMessage = `Requested ${limitParam} jobs but limited to ${credits} due to your current credit balance.`;
+    } else if (limitParam > 100) {
+      warningMessage = `Requested ${limitParam} jobs but capped at the hard limit of 100 jobs per request.`;
+    }
   }
 
   // Fetch jobs from the database
@@ -343,6 +369,7 @@ app.get('/api/jobs/pull', async (c) => {
 
   return c.json({
     success: true,
+    warning: warningMessage,
     jobs: jobs.results,
     deducted: credits > 0 ? jobsReturnedCount : 0,
     quota_used: credits <= 0 ? jobsReturnedCount : 0

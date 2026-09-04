@@ -98,33 +98,40 @@ const authMiddleware = async (c: any, next: any) => {
   }
 
   const token = authHeader.split(' ')[1];
-  
+
+  // Only JWT verification is wrapped here. `next()` must run outside this
+  // try/catch — otherwise any error thrown by the downstream route handler
+  // (a DB error, a bug in the route) gets mis-reported as an "Invalid token"
+  // 401 with leaked internal error text, and never reaches app.onError.
+  let payload: any;
   try {
     // Verify the JWT signature using the backend secret and HS256 algorithm.
     // Throws an error if the token is forged, tampered with, or expired.
-    const payload = await verify(token, c.env.JWT_SECRET, 'HS256');
-    
-    // Validate user state in the database
-    const user = await c.env.DB.prepare('SELECT id, email, is_banned FROM users WHERE id = ?')
-      .bind(payload.id)
-      .first();
-
-    if (!user) {
-      return c.json({ error: 'User not found' }, 401);
-    }
-
-    if (user.is_banned) {
-      return c.json({ error: 'User is banned' }, 403);
-    }
-
-    // Attach user payload to the request context for downstream routes
-    c.set('user', { id: user.id, email: user.email });
-    await next();
-  } catch (err) {
-    const error = err as Error;
-    return c.json({ error: 'Invalid token', details: error.message || error.toString() }, 401);
+    payload = await verify(token, c.env.JWT_SECRET, 'HS256');
+  } catch {
+    return c.json({ error: 'Invalid token' }, 401);
   }
+
+  // Validate user state in the database
+  const user = await c.env.DB.prepare('SELECT id, email, is_banned FROM users WHERE id = ?')
+    .bind(payload.id)
+    .first();
+
+  if (!user) {
+    return c.json({ error: 'User not found' }, 401);
+  }
+
+  if (user.is_banned) {
+    return c.json({ error: 'User is banned' }, 403);
+  }
+
+  // Attach user payload to the request context for downstream routes
+  c.set('user', { id: user.id, email: user.email });
+  await next();
 };
+
+// Free-tier daily pull allowance once a user's credit balance hits 0.
+const DAILY_QUOTA = 50;
 
 // --- API Routes ---
 
@@ -165,6 +172,9 @@ app.post('/api/auth/login', async (c) => {
       if (data.aud !== c.env.GOOGLE_CLIENT_ID) {
         throw new Error('Token audience mismatch');
       }
+      if (data.email_verified !== 'true' && data.email_verified !== true) {
+        throw new Error('Google email not verified');
+      }
       email = data.email;
     } else if (sso_provider === 'github') {
       // Validate GitHub Access Token by fetching the user's profile
@@ -186,7 +196,10 @@ app.post('/api/auth/login', async (c) => {
           }
         });
         const emails = (await emailRes.json()) as any[];
-        email = emails.find((e) => e.primary)?.email || emails[0]?.email;
+        // Only trust verified addresses — GitHub lets an account hold unverified
+        // emails, and we don't want to log someone in as an address they don't own.
+        email = emails.find((e) => e.primary && e.verified)?.email
+          || emails.find((e) => e.verified)?.email;
       } else {
         email = data.email;
       }
@@ -353,7 +366,6 @@ app.get('/api/jobs/pull', async (c) => {
   }
   const limit = Math.min(Math.max(limitParam, 1), 100);
   const today = new Date().toISOString().split('T')[0];
-  const DAILY_QUOTA = 50;
 
   type Reservation = { want: number; fromCredits: boolean; warningMessage?: string };
   let reservation: Reservation | null = null;
@@ -523,7 +535,6 @@ app.get('/api/me', async (c) => {
   }
 
   const today = new Date().toISOString().split('T')[0];
-  const DAILY_QUOTA = 50;
   const pulledToday = userData.last_pull_date === today ? (userData.pulled_today as number) : 0;
 
   return c.json({

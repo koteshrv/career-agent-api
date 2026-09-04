@@ -1,6 +1,28 @@
 -- schema.sql
 -- Run locally via: npm run db:migrate
 -- Run remotely via: npm run db:migrate:remote
+--
+-- WARNING: this file is destructive — it DROPs and recreates every table on
+-- every run. It's meant for first-time setup only. If the production database
+-- already has real users/jobs, re-running db:migrate:remote WILL ERASE THEM.
+-- To add the new `pulled_jobs` table (and idx_jobs_created_at) to an existing
+-- production database without wiping it, run just the additive statements
+-- below by hand instead of this whole file:
+--
+--   CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at DESC);
+--   CREATE TABLE IF NOT EXISTS pulled_jobs (
+--       user_id TEXT NOT NULL,
+--       job_id TEXT NOT NULL,
+--       pulled_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+--       PRIMARY KEY (user_id, job_id),
+--       FOREIGN KEY(user_id) REFERENCES users(id),
+--       FOREIGN KEY(job_id) REFERENCES jobs(id)
+--   );
+--   CREATE INDEX IF NOT EXISTS idx_pulled_jobs_user ON pulled_jobs(user_id);
+--
+-- Going forward this project would benefit from numbered incremental migration
+-- files instead of one destructive schema.sql; not changed here since that's
+-- a bigger structural decision than a bug fix.
 
 DROP TABLE IF EXISTS pulled_jobs;
 DROP TABLE IF EXISTS jobs;

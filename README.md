@@ -25,7 +25,7 @@ npm run db:init
 ```
 **Important:** The command above will output a `database_id`. Create a copy of `wrangler.toml` named `wrangler.prod.toml` (this is ignored by Git to keep your secrets safe). Paste your real `database_id` into `wrangler.prod.toml`. Keep the dummy ID in the public `wrangler.toml`!
 
-Also, make sure to change the `JWT_SECRET` in `wrangler.prod.toml` to a highly secure, random string!
+Also, make sure to change the `JWT_SECRET` in `wrangler.prod.toml` to a highly secure, random string! Set real values for `GOOGLE_CLIENT_ID` (from the Google Cloud Console credentials you set up per the IdP guide — the API rejects Google logins whose token wasn't issued for this client ID) and `ALLOWED_ORIGIN` (your deployed frontend's origin, comma-separated if there's more than one).
 
 ### 4. Run Migrations
 Run the schema setup locally (for development):
@@ -33,10 +33,12 @@ Run the schema setup locally (for development):
 npm run db:migrate
 ```
 
-Run the schema setup remotely (for production). Notice we use the prod config here:
+Run the schema setup remotely (for production, **first-time setup only**). Notice we use the prod config here:
 ```bash
 npx wrangler d1 execute career-agent-db --remote --file=./schema.sql --config wrangler.prod.toml
 ```
+
+**`schema.sql` is destructive** — it drops and recreates every table on every run. Only run the command above against production once, before real users exist. If the schema changes later and production already has data, apply just the new/changed statements by hand (see the comment at the top of `schema.sql` for an example) instead of re-running the whole file.
 
 ### 5. Local Development
 Start the local development server:
@@ -104,8 +106,13 @@ npm run deploy -- --config wrangler.prod.toml
 2. **`POST /api/jobs/push`**
    - Give to Get! Upload scraped jobs.
    - Body: `{ "jobs": [{ "company": "...", "title": "...", "location": "...", "url": "..." }] }`
-   - Earn +1 credit per unique job inserted.
+   - Earn +1 credit per unique job inserted. Entries missing `company`/`title`/`url` are skipped (reported as `invalid_skipped`), not rejected as a whole batch.
 
 3. **`GET /api/jobs/pull?limit=10`**
    - Consume jobs. Deducts -1 credit per job.
    - If credits hit 0, falls back to a strict daily quota (50 jobs/day).
+   - Each user is only ever served a given job once — already-pulled jobs are excluded from future pulls.
+   - May return `409` under heavy concurrent pull requests from the same account; safe to retry.
+
+4. **`GET /api/me`**
+   - Returns your current `current_credits`, `total_pushed`, `total_pulled`, and `daily_quota_remaining`.

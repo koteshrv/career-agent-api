@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import type { MiddlewareHandler } from 'hono';
 import { sign, verify } from 'hono/jwt';
 import { cors } from 'hono/cors';
 
@@ -90,9 +91,12 @@ app.use('*', async (c, next) => {
  * Intercepts requests to protected routes, cryptographically verifies the JWT,
  * and ensures the user exists and is not banned in the database.
  */
-const authMiddleware = async (c: any, next: any) => {
+const authMiddleware: MiddlewareHandler<{ Bindings: Bindings; Variables: Variables }> = async (
+  c,
+  next
+) => {
   const authHeader = c.req.header('Authorization');
-  
+
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return c.json({ error: 'Unauthorized' }, 401);
   }
@@ -103,7 +107,7 @@ const authMiddleware = async (c: any, next: any) => {
   // try/catch — otherwise any error thrown by the downstream route handler
   // (a DB error, a bug in the route) gets mis-reported as an "Invalid token"
   // 401 with leaked internal error text, and never reaches app.onError.
-  let payload: any;
+  let payload: Record<string, unknown>;
   try {
     // Verify the JWT signature using the backend secret and HS256 algorithm.
     // Throws an error if the token is forged, tampered with, or expired.
@@ -112,10 +116,17 @@ const authMiddleware = async (c: any, next: any) => {
     return c.json({ error: 'Invalid token' }, 401);
   }
 
+  // A validly-signed token still has to carry a usable subject. Without this,
+  // a token missing `id` reaches D1 as a bind of `undefined`, which throws and
+  // surfaces as a confusing 500 instead of a plain 401.
+  if (typeof payload.id !== 'string' || payload.id.length === 0) {
+    return c.json({ error: 'Invalid token' }, 401);
+  }
+
   // Validate user state in the database
   const user = await c.env.DB.prepare('SELECT id, email, is_banned FROM users WHERE id = ?')
     .bind(payload.id)
-    .first();
+    .first<{ id: string; email: string; is_banned: number }>();
 
   if (!user) {
     return c.json({ error: 'User not found' }, 401);
@@ -130,8 +141,50 @@ const authMiddleware = async (c: any, next: any) => {
   await next();
 };
 
+/**
+ * --- Economy & Anti-Abuse Policy ---
+ * These are the tuning dials for the Give-to-Get economy. They are deliberately
+ * gathered here so the policy can be adjusted without hunting through handlers.
+ */
+
 // Free-tier daily pull allowance once a user's credit balance hits 0.
 const DAILY_QUOTA = 50;
+
+// Credits granted to a brand-new account. Kept modest on purpose: a large bonus
+// is the cheapest thing to farm with throwaway SSO accounts, and the free daily
+// quota above already covers evaluating the API before contributing.
+const SIGNUP_BONUS = 50;
+
+// Maximum credits a single user can earn from pushing in one UTC day. Without a
+// ceiling, fabricated-but-unique URLs mint unlimited credits.
+const DAILY_PUSH_CREDIT_CAP = 500;
+
+// Distinct users who must report a job before it is flagged and withdrawn.
+const REPORTS_TO_FLAG_JOB = 3;
+
+// Flagged jobs a contributor may accumulate before being auto-banned.
+const FLAGS_TO_BAN_USER = 5;
+
+// Upper bounds on stored job fields, to keep junk/oversized rows out of D1.
+const MAX_FIELD_LENGTH = 512;
+const MAX_URL_LENGTH = 2048;
+
+/**
+ * A pushed job's URL must be a syntactically real http(s) URL with a hostname
+ * containing a dot. This won't stop a determined faker, but it removes the
+ * zero-effort path of minting credits from strings like "junk1".
+ */
+const isValidJobUrl = (value: string): boolean => {
+  if (value.length > MAX_URL_LENGTH) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+  return parsed.hostname.includes('.') && !parsed.hostname.endsWith('.');
+};
 
 // --- API Routes ---
 
@@ -224,9 +277,9 @@ app.post('/api/auth/login', async (c) => {
     // Register new user and award the initial Give-to-Get signup bonus
     userId = crypto.randomUUID();
     await c.env.DB.prepare(
-      'INSERT INTO users (id, email, sso_provider, current_credits) VALUES (?, ?, ?, 300)'
+      'INSERT INTO users (id, email, sso_provider, current_credits) VALUES (?, ?, ?, ?)'
     )
-      .bind(userId, email, sso_provider)
+      .bind(userId, email, sso_provider, SIGNUP_BONUS)
       .run();
   } else {
     userId = user.id as string;
@@ -278,19 +331,24 @@ app.post('/api/jobs/push', async (c) => {
     return c.json({ error: 'Payload too large. Maximum 1000 jobs allowed per request.' }, 413);
   }
 
-  const isNonEmptyString = (v: unknown): v is string => typeof v === 'string' && v.trim().length > 0;
+  const isValidField = (v: unknown): v is string =>
+    typeof v === 'string' && v.trim().length > 0 && v.length <= MAX_FIELD_LENGTH;
 
-  // Filter out malformed entries up front. Without this, a single job missing a
-  // required NOT NULL column fails the whole chunk's batch transaction below,
-  // costing every valid job in that chunk its credit.
+  // Filter out malformed entries up front, for two reasons: a single job missing
+  // a required NOT NULL column would fail the whole chunk's batch transaction
+  // below (costing every valid job in that chunk its credit), and unvalidated
+  // URLs let anyone mint credits from arbitrary junk strings.
   const validJobs = jobs.filter(
     (job) =>
       job &&
       typeof job === 'object' &&
-      isNonEmptyString(job.company) &&
-      isNonEmptyString(job.title) &&
-      isNonEmptyString(job.url) &&
-      (job.location === undefined || job.location === null || typeof job.location === 'string')
+      isValidField(job.company) &&
+      isValidField(job.title) &&
+      typeof job.url === 'string' &&
+      isValidJobUrl(job.url.trim()) &&
+      (job.location === undefined ||
+        job.location === null ||
+        (typeof job.location === 'string' && job.location.length <= MAX_FIELD_LENGTH))
   );
   const invalidSkipped = jobs.length - validJobs.length;
 
@@ -335,21 +393,77 @@ app.post('/api/jobs/push', async (c) => {
     }
   }
 
-  // Credit the user's account for their contributions
-  if (creditsEarned > 0) {
-    await c.env.DB.prepare(
-      'UPDATE users SET current_credits = current_credits + ?, total_pushed = total_pushed + ? WHERE id = ?'
+  // Credit the user's account for their contributions, up to the daily earn cap.
+  // The jobs themselves are kept either way — they still benefit the shared pool —
+  // but credit beyond the cap is not minted, which is what makes bulk fabrication
+  // pointless. Guarded + retried like the pull reservation so two concurrent
+  // pushes can't both spend the same remaining allowance.
+  const today = new Date().toISOString().split('T')[0];
+  let creditsAwarded = 0;
+  let capReached = false;
+
+  for (let attempt = 0; attempt < 3 && creditsEarned > 0; attempt++) {
+    const quotaRow = await c.env.DB.prepare(
+      'SELECT pushed_today, last_push_date FROM users WHERE id = ?'
     )
-      .bind(creditsEarned, creditsEarned, user.id)
+      .bind(user.id)
+      .first<{ pushed_today: number; last_push_date: string | null }>();
+
+    if (!quotaRow) {
+      return c.json({ error: 'User not found' }, 404);
+    }
+
+    const pushedToday = quotaRow.last_push_date === today ? quotaRow.pushed_today : 0;
+    const award = Math.min(creditsEarned, Math.max(0, DAILY_PUSH_CREDIT_CAP - pushedToday));
+
+    if (award <= 0) {
+      capReached = true;
+      break;
+    }
+
+    const result = await c.env.DB.prepare(
+      `UPDATE users
+       SET current_credits = current_credits + ?,
+           total_pushed = total_pushed + ?,
+           pushed_today = CASE WHEN last_push_date = ? THEN pushed_today + ? ELSE ? END,
+           last_push_date = ?
+       WHERE id = ?
+         AND (CASE WHEN last_push_date = ? THEN pushed_today ELSE 0 END) + ? <= ?`
+    )
+      .bind(
+        award,
+        creditsEarned,
+        today,
+        award,
+        award,
+        today,
+        user.id,
+        today,
+        award,
+        DAILY_PUSH_CREDIT_CAP
+      )
       .run();
+
+    if (result.meta.changes > 0) {
+      creditsAwarded = award;
+      capReached = award < creditsEarned;
+      break;
+    }
+    // else: a concurrent push consumed the allowance — re-read and recompute
   }
 
   return c.json({
     success: true,
     message: `Pushed ${jobs.length} jobs.`,
-    credits_earned: creditsEarned,
+    credits_earned: creditsAwarded,
+    jobs_accepted: creditsEarned,
     invalid_skipped: invalidSkipped,
     failed,
+    ...(capReached
+      ? {
+          warning: `Daily push credit cap of ${DAILY_PUSH_CREDIT_CAP} reached. Jobs were still stored, but no further credits were earned today.`,
+        }
+      : {}),
   });
 });
 
@@ -456,7 +570,8 @@ app.get('/api/jobs/pull', async (c) => {
   // actually advances instead of handing back the same newest N jobs forever.
   const candidates = await c.env.DB.prepare(
     `SELECT id, company, title, location, url, created_at FROM jobs
-     WHERE id NOT IN (SELECT job_id FROM pulled_jobs WHERE user_id = ?)
+     WHERE is_flagged = 0
+       AND id NOT IN (SELECT job_id FROM pulled_jobs WHERE user_id = ?)
      ORDER BY created_at DESC LIMIT ?`
   )
     .bind(user.id, reservation.want)
@@ -518,6 +633,124 @@ app.get('/api/jobs/pull', async (c) => {
 });
 
 /**
+ * POST /api/jobs/report
+ * Community quality control: report a job as fake, dead, or spam.
+ *
+ * Only a user who actually pulled the job may report it, and the (job_id,
+ * reporter_user_id) primary key allows one report per user per job — together
+ * these stop a single account from flagging jobs on its own or brigading a
+ * contributor it has never interacted with. Once REPORTS_TO_FLAG_JOB distinct
+ * users report the same job it is withdrawn from circulation, the contributor's
+ * earned credit for it is clawed back, and a strike is recorded; at
+ * FLAGS_TO_BAN_USER strikes the contributor is auto-banned.
+ */
+app.post('/api/jobs/report', async (c) => {
+  const user = c.get('user');
+  let body: any;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+
+  const { job_id, reason } = body;
+
+  if (typeof job_id !== 'string' || job_id.length === 0) {
+    return c.json({ error: 'Missing or invalid job_id' }, 400);
+  }
+  if (reason !== undefined && reason !== null && typeof reason !== 'string') {
+    return c.json({ error: 'Invalid reason' }, 400);
+  }
+
+  const job = await c.env.DB.prepare(
+    'SELECT id, scraped_by_user_id, is_flagged FROM jobs WHERE id = ?'
+  )
+    .bind(job_id)
+    .first<{ id: string; scraped_by_user_id: string; is_flagged: number }>();
+
+  if (!job) {
+    return c.json({ error: 'Job not found' }, 404);
+  }
+
+  // Gate reporting on having actually received the job. Without this, reporting
+  // becomes a free weapon against any contributor.
+  const hasPulled = await c.env.DB.prepare(
+    'SELECT 1 FROM pulled_jobs WHERE user_id = ? AND job_id = ?'
+  )
+    .bind(user.id, job_id)
+    .first();
+
+  if (!hasPulled) {
+    return c.json({ error: 'You can only report a job you have pulled' }, 403);
+  }
+
+  const insert = await c.env.DB.prepare(
+    'INSERT OR IGNORE INTO job_reports (job_id, reporter_user_id, reason) VALUES (?, ?, ?)'
+  )
+    .bind(job_id, user.id, typeof reason === 'string' ? reason.slice(0, MAX_FIELD_LENGTH) : null)
+    .run();
+
+  if (insert.meta.changes === 0) {
+    return c.json({ success: true, message: 'You have already reported this job.' });
+  }
+
+  const countRow = await c.env.DB.prepare(
+    'SELECT COUNT(*) AS report_count FROM job_reports WHERE job_id = ?'
+  )
+    .bind(job_id)
+    .first<{ report_count: number }>();
+
+  const reportCount = countRow?.report_count ?? 0;
+  let jobFlagged = false;
+  let contributorBanned = false;
+
+  // Flag exactly once, on the transition past the threshold. The is_flagged = 0
+  // guard makes this idempotent under concurrent reports, so the contributor
+  // can't be penalised twice for the same job.
+  if (reportCount >= REPORTS_TO_FLAG_JOB && job.is_flagged === 0) {
+    const flagResult = await c.env.DB.prepare(
+      'UPDATE jobs SET is_flagged = 1 WHERE id = ? AND is_flagged = 0'
+    )
+      .bind(job_id)
+      .run();
+
+    if (flagResult.meta.changes > 0) {
+      jobFlagged = true;
+
+      // Claw back the credit earned for this job and record a strike. Credits
+      // are floored at 0 rather than going negative, which would silently push
+      // the contributor into the free-quota branch of the pull economy.
+      const strike = await c.env.DB.prepare(
+        `UPDATE users
+         SET flagged_count = flagged_count + 1,
+             current_credits = MAX(0, current_credits - 1)
+         WHERE id = ?
+         RETURNING flagged_count`
+      )
+        .bind(job.scraped_by_user_id)
+        .first<{ flagged_count: number }>();
+
+      if (strike && strike.flagged_count >= FLAGS_TO_BAN_USER) {
+        const ban = await c.env.DB.prepare(
+          'UPDATE users SET is_banned = 1 WHERE id = ? AND is_banned = 0'
+        )
+          .bind(job.scraped_by_user_id)
+          .run();
+        contributorBanned = ban.meta.changes > 0;
+      }
+    }
+  }
+
+  return c.json({
+    success: true,
+    report_count: reportCount,
+    reports_needed_to_flag: REPORTS_TO_FLAG_JOB,
+    job_flagged: jobFlagged,
+    contributor_banned: contributorBanned,
+  });
+});
+
+/**
  * GET /api/me
  * Returns the authenticated user's current Give-to-Get economy balance and stats.
  */
@@ -525,17 +758,31 @@ app.get('/api/me', async (c) => {
   const user = c.get('user');
 
   const userData = await c.env.DB.prepare(
-    'SELECT id, email, current_credits, total_pushed, total_pulled, pulled_today, last_pull_date FROM users WHERE id = ?'
+    `SELECT id, email, current_credits, total_pushed, total_pulled,
+            pulled_today, last_pull_date, pushed_today, last_push_date, flagged_count
+     FROM users WHERE id = ?`
   )
     .bind(user.id)
-    .first();
+    .first<{
+      id: string;
+      email: string;
+      current_credits: number;
+      total_pushed: number;
+      total_pulled: number;
+      pulled_today: number;
+      last_pull_date: string | null;
+      pushed_today: number;
+      last_push_date: string | null;
+      flagged_count: number;
+    }>();
 
   if (!userData) {
     return c.json({ error: 'User not found' }, 404);
   }
 
   const today = new Date().toISOString().split('T')[0];
-  const pulledToday = userData.last_pull_date === today ? (userData.pulled_today as number) : 0;
+  const pulledToday = userData.last_pull_date === today ? userData.pulled_today : 0;
+  const pushedToday = userData.last_push_date === today ? userData.pushed_today : 0;
 
   return c.json({
     id: userData.id,
@@ -544,7 +791,24 @@ app.get('/api/me', async (c) => {
     total_pushed: userData.total_pushed,
     total_pulled: userData.total_pulled,
     daily_quota_remaining: Math.max(0, DAILY_QUOTA - pulledToday),
+    daily_push_credits_remaining: Math.max(0, DAILY_PUSH_CREDIT_CAP - pushedToday),
+    flagged_count: userData.flagged_count,
   });
+});
+
+/**
+ * GET /health
+ * Unauthenticated liveness/readiness probe for uptime monitoring. Also verifies
+ * the D1 binding actually answers, since a healthy Worker with a broken database
+ * binding is not actually serving.
+ */
+app.get('/health', async (c) => {
+  try {
+    await c.env.DB.prepare('SELECT 1').first();
+    return c.json({ status: 'ok', database: 'ok' });
+  } catch {
+    return c.json({ status: 'degraded', database: 'unreachable' }, 503);
+  }
 });
 
 /**

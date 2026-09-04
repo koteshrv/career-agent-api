@@ -25,7 +25,13 @@ npm run db:init
 ```
 **Important:** The command above will output a `database_id`. Create a copy of `wrangler.toml` named `wrangler.prod.toml` (this is ignored by Git to keep your secrets safe). Paste your real `database_id` into `wrangler.prod.toml`. Keep the dummy ID in the public `wrangler.toml`!
 
-Also, make sure to change the `JWT_SECRET` in `wrangler.prod.toml` to a highly secure, random string! Set real values for `GOOGLE_CLIENT_ID` (from the Google Cloud Console credentials you set up per the IdP guide — the API rejects Google logins whose token wasn't issued for this client ID) and `ALLOWED_ORIGIN` (your deployed frontend's origin, comma-separated if there's more than one).
+Set real values for `GOOGLE_CLIENT_ID` (from the Google Cloud Console credentials you set up per the IdP guide — the API rejects Google logins whose token wasn't issued for this client ID) and `ALLOWED_ORIGIN` (your deployed frontend's origin, comma-separated if there's more than one).
+
+**On `JWT_SECRET`:** values under `[vars]` are plain configuration, not secrets — they're bundled into the Worker and readable by anyone with dashboard access. For production, store it as a real secret instead, and remove the `JWT_SECRET` line from `wrangler.prod.toml`:
+```bash
+npx wrangler secret put JWT_SECRET --config wrangler.prod.toml
+```
+Keep the dummy value in `wrangler.toml` for local development.
 
 ### 4. Run Migrations
 Run the schema setup locally (for development):
@@ -106,7 +112,8 @@ npm run deploy -- --config wrangler.prod.toml
 2. **`POST /api/jobs/push`**
    - Give to Get! Upload scraped jobs.
    - Body: `{ "jobs": [{ "company": "...", "title": "...", "location": "...", "url": "..." }] }`
-   - Earn +1 credit per unique job inserted. Entries missing `company`/`title`/`url` are skipped (reported as `invalid_skipped`), not rejected as a whole batch.
+   - Earn +1 credit per unique job inserted, up to a **daily cap of 500 earned credits**. Jobs beyond the cap are still stored, they just stop earning.
+   - `url` must be a real `http(s)` URL; entries with junk URLs, missing `company`/`title`/`url`, or oversized fields are skipped (reported as `invalid_skipped`) rather than failing the whole batch.
 
 3. **`GET /api/jobs/pull?limit=10`**
    - Consume jobs. Deducts -1 credit per job.
@@ -114,5 +121,27 @@ npm run deploy -- --config wrangler.prod.toml
    - Each user is only ever served a given job once — already-pulled jobs are excluded from future pulls.
    - May return `409` under heavy concurrent pull requests from the same account; safe to retry.
 
-4. **`GET /api/me`**
-   - Returns your current `current_credits`, `total_pushed`, `total_pulled`, and `daily_quota_remaining`.
+4. **`POST /api/jobs/report`**
+   - Community quality control. Report a job as fake or dead: `{ "job_id": "...", "reason": "dead_link" }`.
+   - You can only report a job you actually pulled, once per job. Once **3 distinct users** report the same job it is flagged and withdrawn from circulation, the contributor loses the credit earned for it and takes a strike; at **5 strikes** the contributor is auto-banned.
+
+5. **`GET /api/me`**
+   - Returns your current `current_credits`, `total_pushed`, `total_pulled`, `daily_quota_remaining`, `daily_push_credits_remaining`, and `flagged_count`.
+
+### Operations
+
+6. **`GET /health`** (no auth)
+   - Liveness probe; also confirms the D1 binding responds. Returns `503` if the database is unreachable.
+
+## Economy & Anti-Abuse Dials
+
+All tuning constants live together at the top of the routes section in [src/index.ts](src/index.ts) — signup bonus, daily pull quota, daily push credit cap, and the report/strike thresholds. Adjust them there rather than hunting through handlers.
+
+## Testing
+
+```bash
+npm test          # vitest against a real Workers runtime + local D1
+npm run typecheck # tsc --noEmit
+```
+
+The suite covers the economy invariants that are easy to break by accident: credits are never overspent under concurrent pulls, the same job is never delivered twice, unfulfilled reservations are refunded, and fabricated URLs earn nothing. CI runs both on every push and pull request.

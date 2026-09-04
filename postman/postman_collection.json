@@ -125,6 +125,93 @@
         "description": "Pulls the latest jobs and deducts credits. Requires JWT token."
       },
       "response": []
+    },
+    {
+      "name": "4. Report a Job",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{jwt_token}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n    \"job_id\": \"PASTE_JOB_ID_FROM_PULL\",\n    \"reason\": \"dead_link\"\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/jobs/report",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "jobs",
+            "report"
+          ]
+        },
+        "description": "Report a pulled job as fake or dead. 3 distinct reports flag the job and penalise the contributor."
+      },
+      "response": []
+    },
+    {
+      "name": "5. Get Account Info",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{jwt_token}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/me",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "me"
+          ]
+        },
+        "description": "Current credit balance, contribution stats, remaining daily quota and push-credit allowance."
+      },
+      "response": []
+    },
+    {
+      "name": "6. Health Check",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/health",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "health"
+          ]
+        },
+        "description": "Unauthenticated liveness probe; also verifies the D1 binding responds."
+      },
+      "response": []
     }
   ],
   "variable": [
@@ -140,4 +227,3 @@
     }
   ]
 }
-

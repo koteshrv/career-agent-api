@@ -1,11 +1,9 @@
 name = "career-agent-api"
-compatibility_date = "2024-09-03"
+compatibility_date = "2025-09-03"
 main = "src/index.ts"
 
 [vars]
 JWT_SECRET = "super-secret-key-change-in-production"
-GITHUB_CLIENT_ID = "YOUR_GITHUB_CLIENT_ID"
-GITHUB_CLIENT_SECRET = "YOUR_GITHUB_CLIENT_SECRET"
 # Your Google OAuth Client ID — required so /api/auth/login can verify that a
 # Google ID token was actually issued for THIS app (the `aud` claim), not some
 # unrelated site. Get it from console.cloud.google.com > APIs & Services > Credentials.

@@ -137,6 +137,10 @@ npm run deploy -- --config wrangler.prod.toml
 
 All tuning constants live together at the top of the routes section in [src/index.ts](src/index.ts) — signup bonus, daily pull quota, daily push credit cap, and the report/strike thresholds. Adjust them there rather than hunting through handlers.
 
+## Inspecting the Database
+
+For SQL to check job entries, user credits/bans, pull history, or reports directly against D1 — via `wrangler` or the Cloudflare Dashboard Console — see [DATABASE_QUERIES.md](DATABASE_QUERIES.md).
+
 ## Testing
 
 ```bash

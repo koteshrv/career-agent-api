@@ -260,6 +260,12 @@ app.post('/api/auth/login', async (c) => {
       return c.json({ error: 'Unsupported SSO provider (Only Google/GitHub supported)' }, 400);
     }
   } catch (err) {
+    // Logged server-side only — the client gets a generic message on purpose
+    // (don't hand an attacker a probe for which check failed), but this exact
+    // reason (aud mismatch vs. unverified email vs. actually-invalid token)
+    // otherwise vanishes, which makes this endpoint painful to debug from the
+    // outside. Check `wrangler tail` / the dashboard logs for this line.
+    console.error('Login verification failed:', sso_provider, err instanceof Error ? err.message : err);
     return c.json({ error: 'Identity Provider verification failed. Token invalid.' }, 401);
   }
 

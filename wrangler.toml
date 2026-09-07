@@ -10,6 +10,10 @@ JWT_SECRET = "super-secret-key-change-in-production"
 GOOGLE_CLIENT_ID = "YOUR_GOOGLE_CLIENT_ID"
 # Comma-separated list of frontend origins allowed to call this API via CORS.
 ALLOWED_ORIGIN = "http://localhost:5173"
+PRIVATE_KEY = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
+PUBLIC_KEY = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"
+GITHUB_CLIENT_ID = "YOUR_GITHUB_CLIENT_ID"
+GITHUB_CLIENT_SECRET = "YOUR_GITHUB_CLIENT_SECRET"
 
 [[d1_databases]]
 binding = "DB"

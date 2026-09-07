@@ -21,6 +21,7 @@
 --   ALTER TABLE users ADD COLUMN pushed_today INTEGER DEFAULT 0;
 --   ALTER TABLE users ADD COLUMN last_push_date DATE;
 --   ALTER TABLE users ADD COLUMN flagged_count INTEGER DEFAULT 0;
+--   ALTER TABLE users ADD COLUMN last_login_ip TEXT;
 --   ALTER TABLE jobs ADD COLUMN is_flagged BOOLEAN DEFAULT 0;
 --   CREATE TABLE IF NOT EXISTS job_reports (
 --       job_id TEXT NOT NULL,
@@ -57,6 +58,7 @@ CREATE TABLE users (
     -- Number of this user's jobs that the community has flagged as fake/dead
     flagged_count INTEGER DEFAULT 0,
     is_banned BOOLEAN DEFAULT 0,
+    last_login_ip TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 

@@ -12,6 +12,10 @@ type Bindings = {
   JWT_SECRET: string;       // Secret key used to sign and verify JWTs
   GOOGLE_CLIENT_ID: string; // OAuth client ID this API accepts Google ID tokens for (audience check)
   ALLOWED_ORIGIN?: string;  // Comma-separated list of allowed CORS origins (defaults to local dev)
+  PRIVATE_KEY: string;      // RS256 Private Key for signing JWTs
+  PUBLIC_KEY: string;       // RS256 Public Key for verifying JWTs locally
+  GITHUB_CLIENT_ID: string; // GitHub OAuth App Client ID
+  GITHUB_CLIENT_SECRET: string; // GitHub OAuth App Client Secret
 };
 
 /**
@@ -109,9 +113,9 @@ const authMiddleware: MiddlewareHandler<{ Bindings: Bindings; Variables: Variabl
   // 401 with leaked internal error text, and never reaches app.onError.
   let payload: Record<string, unknown>;
   try {
-    // Verify the JWT signature using the backend secret and HS256 algorithm.
+    // Verify the JWT signature using the PUBLIC_KEY and RS256 algorithm.
     // Throws an error if the token is forged, tampered with, or expired.
-    payload = await verify(token, c.env.JWT_SECRET, 'HS256');
+    payload = await verify(token, c.env.PUBLIC_KEY, 'RS256');
   } catch {
     return c.json({ error: 'Invalid token' }, 401);
   }
@@ -230,21 +234,39 @@ app.post('/api/auth/login', async (c) => {
       }
       email = data.email;
     } else if (sso_provider === 'github') {
-      // Validate GitHub Access Token by fetching the user's profile
+      // 1. Exchange the GitHub OAuth 'code' for an 'access_token'
+      const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          client_id: c.env.GITHUB_CLIENT_ID,
+          client_secret: c.env.GITHUB_CLIENT_SECRET,
+          code: idp_token
+        })
+      });
+      const tokenData = (await tokenRes.json()) as any;
+      const accessToken = tokenData.access_token;
+
+      if (!accessToken) throw new Error('Invalid GitHub code or missing secrets');
+
+      // 2. Validate GitHub Access Token by fetching the user's profile
       const res = await fetch('https://api.github.com/user', {
         headers: {
-          Authorization: `Bearer ${idp_token}`,
+          Authorization: `Bearer ${accessToken}`,
           'User-Agent': 'Career-Agent-API'
         }
       });
       if (!res.ok) throw new Error('Invalid GitHub token');
       const data = (await res.json()) as any;
       
-      // GitHub sometimes hides the primary email, so we explicitly fetch their emails
+      // 3. GitHub sometimes hides the primary email, so we explicitly fetch their emails
       if (!data.email) {
         const emailRes = await fetch('https://api.github.com/user/emails', {
           headers: { 
-            Authorization: `Bearer ${idp_token}`, 
+            Authorization: `Bearer ${accessToken}`, 
             'User-Agent': 'Career-Agent-API' 
           }
         });
@@ -278,30 +300,37 @@ app.post('/api/auth/login', async (c) => {
     .first();
 
   let userId: string;
+  const clientIp = c.req.header('cf-connecting-ip') || 'unknown';
 
   if (!user) {
     // Register new user and award the initial Give-to-Get signup bonus
     userId = crypto.randomUUID();
     await c.env.DB.prepare(
-      'INSERT INTO users (id, email, sso_provider, current_credits) VALUES (?, ?, ?, ?)'
+      'INSERT INTO users (id, email, sso_provider, current_credits, last_login_ip) VALUES (?, ?, ?, ?, ?)'
     )
-      .bind(userId, email, sso_provider, SIGNUP_BONUS)
+      .bind(userId, email, sso_provider, SIGNUP_BONUS, clientIp)
       .run();
   } else {
     userId = user.id as string;
+    // Update the user's latest IP address on login
+    await c.env.DB.prepare('UPDATE users SET last_login_ip = ? WHERE id = ?')
+      .bind(clientIp, userId)
+      .run();
   }
 
   // Construct the JWT payload expiring in 7 days
   const payload = {
     id: userId,
+    email: email, // Required for Local API verification
     exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7,
   };
   
-  // Sign the token with the internal JWT secret
-  const token = await sign(payload, c.env.JWT_SECRET, 'HS256');
+  // Sign the token with the internal PRIVATE_KEY using RS256
+  const token = await sign(payload, c.env.PRIVATE_KEY, 'RS256');
 
   return c.json({
-    access_token: token,
+    token: token,
+    access_token: token, // Kept for backward compatibility
     token_type: 'bearer',
     expires_in: 604800,
   });

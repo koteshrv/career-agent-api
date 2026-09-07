@@ -63,7 +63,6 @@ paths:
   /api/auth/login:
     post:
       summary: SSO Login
-      description: Exchanges a Google or GitHub Identity Provider (IdP) token for an internal API JWT.
       description: >
         Exchanges a Google or GitHub Identity Provider (IdP) token for an internal Asymmetric RS256 API JWT. 
         The generated RS256 token embeds the user's `email` and can be cryptographically verified offline by local API containers using the central Public Key. 
@@ -81,7 +80,6 @@ paths:
               properties:
                 idp_token:
                   type: string
-                  description: The JWT (for Google) or Access Token (for GitHub) provided by the IdP.
                   description: The JWT ID Token (for Google) or the raw OAuth Authorization Code (for GitHub).
                 sso_provider:
                   type: string
@@ -107,10 +105,8 @@ paths:
                     type: integer
                     example: 604800
         '400':
-          description: Missing parameters
           description: Missing parameters or failed to extract email from IdP.
         '401':
-          description: Invalid IdP token
           description: Invalid IdP token or GitHub code exchange failed.
 
   /api/jobs/push:

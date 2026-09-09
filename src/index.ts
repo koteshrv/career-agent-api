@@ -5,6 +5,7 @@ import { checkRateLimit } from "./redis";
 import type { MiddlewareHandler } from 'hono';
 import { sign, verify } from 'hono/jwt';
 import { cors } from 'hono/cors';
+import { logger } from 'hono/logger';
 
 /**
  * Defines data that can be passed between middleware and route handlers.
@@ -20,6 +21,9 @@ type Variables = {
  * Initialize the Hono application with strict typing for bindings and variables.
  */
 const app = new Hono<{ Variables: Variables }>();
+
+// Add request logging
+app.use('*', logger());
 
 /**
  * --- CORS Configuration ---

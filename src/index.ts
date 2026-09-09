@@ -39,39 +39,14 @@ app.use('*', cors({
   maxAge: 600,
 }));
 
+
 /**
  * --- Rate Limiting Middleware ---
- * Provides basic in-memory rate limiting to protect the API from spam.
- * Note: For production, this should be replaced with production-grade Rate Limiting,
  */
-const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
-const RATE_LIMIT_PRUNE_THRESHOLD = 10000;
-
 app.use('*', async (c, next) => {
   const ip = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for') || 'unknown';
-  const now = Date.now();
-  const windowMs = 60 * 1000; // 1 minute window
-  const maxRequests = 100;
-
-  const record = rateLimitMap.get(ip);
-  if (!record || record.resetTime < now) {
-    // Initialize or reset the window for this IP
-    rateLimitMap.set(ip, { count: 1, resetTime: now + windowMs });
-
-    // Bound memory: an isolate that sees many unique IPs would otherwise
-    // accumulate stale entries forever since they're never evicted on their own.
-    if (rateLimitMap.size > RATE_LIMIT_PRUNE_THRESHOLD) {
-      for (const [key, entry] of rateLimitMap) {
-        if (entry.resetTime < now) rateLimitMap.delete(key);
-      }
-    }
-  } else {
-    // Increment and check limits
-    record.count++;
-    if (record.count > maxRequests) {
   
   if (ip !== 'unknown') {
-    const isAllowed = await checkRateLimit(ip, 100, 60); // 100 requests per 60 seconds
     // 100 requests per 60 seconds
     const isAllowed = await checkRateLimit(ip, 100, 60);
     if (!isAllowed) {
@@ -81,7 +56,6 @@ app.use('*', async (c, next) => {
 
   await next();
 });
-
 /**
  * --- JWT Authentication Middleware ---
  * Intercepts requests to protected routes, cryptographically verifies the JWT,
@@ -107,8 +81,8 @@ const authMiddleware: MiddlewareHandler<{ Variables: Variables }> = async (
   try {
     // Verify the JWT signature using the PUBLIC_KEY and RS256 algorithm.
     // Throws an error if the token is forged, tampered with, or expired.
-    payload = await verify(token, process.env.PUBLIC_KEY, 'RS256');
     payload = await verify(token, process.env.PUBLIC_KEY!, 'RS256');
+    payload = await verify(token, process.env.PUBLIC_KEY!!, 'RS256');
   } catch {
     return c.json({ error: 'Invalid token' }, 401);
   }
@@ -319,7 +293,6 @@ app.post('/api/auth/login', async (c) => {
   };
   
   // Sign the token with the internal PRIVATE_KEY using RS256
-  const token = await sign(payload, process.env.PRIVATE_KEY, 'RS256');
   const token = await sign(payload, process.env.PRIVATE_KEY!, 'RS256');
 
   return c.json({

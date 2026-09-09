@@ -82,7 +82,6 @@ const authMiddleware: MiddlewareHandler<{ Variables: Variables }> = async (
     // Verify the JWT signature using the PUBLIC_KEY and RS256 algorithm.
     // Throws an error if the token is forged, tampered with, or expired.
     payload = await verify(token, process.env.PUBLIC_KEY!, 'RS256');
-    payload = await verify(token, process.env.PUBLIC_KEY!!, 'RS256');
   } catch {
     return c.json({ error: 'Invalid token' }, 401);
   }

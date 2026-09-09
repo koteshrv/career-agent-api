@@ -72,6 +72,8 @@ app.use('*', async (c, next) => {
   
   if (ip !== 'unknown') {
     const isAllowed = await checkRateLimit(ip, 100, 60); // 100 requests per 60 seconds
+    // 100 requests per 60 seconds
+    const isAllowed = await checkRateLimit(ip, 100, 60);
     if (!isAllowed) {
       return c.json({ error: 'Too Many Requests' }, 429);
     }
@@ -106,6 +108,7 @@ const authMiddleware: MiddlewareHandler<{ Variables: Variables }> = async (
     // Verify the JWT signature using the PUBLIC_KEY and RS256 algorithm.
     // Throws an error if the token is forged, tampered with, or expired.
     payload = await verify(token, process.env.PUBLIC_KEY, 'RS256');
+    payload = await verify(token, process.env.PUBLIC_KEY!, 'RS256');
   } catch {
     return c.json({ error: 'Invalid token' }, 401);
   }
@@ -317,6 +320,7 @@ app.post('/api/auth/login', async (c) => {
   
   // Sign the token with the internal PRIVATE_KEY using RS256
   const token = await sign(payload, process.env.PRIVATE_KEY, 'RS256');
+  const token = await sign(payload, process.env.PRIVATE_KEY!, 'RS256');
 
   return c.json({
     token: token,

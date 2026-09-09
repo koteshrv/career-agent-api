@@ -1,25 +1,12 @@
+import "dotenv/config";
 import { Hono } from 'hono';
+import { DB } from "./db";
+import { checkRateLimit } from "./redis";
 import type { MiddlewareHandler } from 'hono';
 import { sign, verify } from 'hono/jwt';
 import { cors } from 'hono/cors';
 
 /**
- * Cloudflare Worker Bindings
- * Defines the environment variables and resources available to the Worker.
- */
-type Bindings = {
-  DB: D1Database;           // Cloudflare D1 Serverless SQLite Database
-  JWT_SECRET: string;       // Secret key used to sign and verify JWTs
-  GOOGLE_CLIENT_ID: string; // OAuth client ID this API accepts Google ID tokens for (audience check)
-  ALLOWED_ORIGIN?: string;  // Comma-separated list of allowed CORS origins (defaults to local dev)
-  PRIVATE_KEY: string;      // RS256 Private Key for signing JWTs
-  PUBLIC_KEY: string;       // RS256 Public Key for verifying JWTs locally
-  GITHUB_CLIENT_ID: string; // GitHub OAuth App Client ID
-  GITHUB_CLIENT_SECRET: string; // GitHub OAuth App Client Secret
-};
-
-/**
- * Context Variables
  * Defines data that can be passed between middleware and route handlers.
  */
 type Variables = {
@@ -32,7 +19,7 @@ type Variables = {
 /**
  * Initialize the Hono application with strict typing for bindings and variables.
  */
-const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+const app = new Hono<{ Variables: Variables }>();
 
 /**
  * --- CORS Configuration ---
@@ -42,7 +29,7 @@ const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
  */
 app.use('*', cors({
   origin: (origin, c) => {
-    const allowed = (c.env.ALLOWED_ORIGIN || 'http://localhost:5173')
+    const allowed = (process.env.ALLOWED_ORIGIN || 'http://localhost:5173')
       .split(',')
       .map((o: string) => o.trim());
     return origin && allowed.includes(origin) ? origin : allowed[0];
@@ -55,14 +42,13 @@ app.use('*', cors({
 /**
  * --- Rate Limiting Middleware ---
  * Provides basic in-memory rate limiting to protect the API from spam.
- * Note: For production, this should be replaced with Cloudflare WAF Rate Limiting,
- * as in-memory state is not shared across different Cloudflare Edge nodes.
+ * Note: For production, this should be replaced with production-grade Rate Limiting,
  */
 const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
 const RATE_LIMIT_PRUNE_THRESHOLD = 10000;
 
 app.use('*', async (c, next) => {
-  const ip = c.req.header('cf-connecting-ip') || 'unknown';
+  const ip = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for') || 'unknown';
   const now = Date.now();
   const windowMs = 60 * 1000; // 1 minute window
   const maxRequests = 100;
@@ -83,6 +69,10 @@ app.use('*', async (c, next) => {
     // Increment and check limits
     record.count++;
     if (record.count > maxRequests) {
+  
+  if (ip !== 'unknown') {
+    const isAllowed = await checkRateLimit(ip, 100, 60); // 100 requests per 60 seconds
+    if (!isAllowed) {
       return c.json({ error: 'Too Many Requests' }, 429);
     }
   }
@@ -95,7 +85,7 @@ app.use('*', async (c, next) => {
  * Intercepts requests to protected routes, cryptographically verifies the JWT,
  * and ensures the user exists and is not banned in the database.
  */
-const authMiddleware: MiddlewareHandler<{ Bindings: Bindings; Variables: Variables }> = async (
+const authMiddleware: MiddlewareHandler<{ Variables: Variables }> = async (
   c,
   next
 ) => {
@@ -115,20 +105,20 @@ const authMiddleware: MiddlewareHandler<{ Bindings: Bindings; Variables: Variabl
   try {
     // Verify the JWT signature using the PUBLIC_KEY and RS256 algorithm.
     // Throws an error if the token is forged, tampered with, or expired.
-    payload = await verify(token, c.env.PUBLIC_KEY, 'RS256');
+    payload = await verify(token, process.env.PUBLIC_KEY, 'RS256');
   } catch {
     return c.json({ error: 'Invalid token' }, 401);
   }
 
   // A validly-signed token still has to carry a usable subject. Without this,
-  // a token missing `id` reaches D1 as a bind of `undefined`, which throws and
+  // a token missing `id` reaches the database as a bind of `undefined`, which throws and
   // surfaces as a confusing 500 instead of a plain 401.
   if (typeof payload.id !== 'string' || payload.id.length === 0) {
     return c.json({ error: 'Invalid token' }, 401);
   }
 
   // Validate user state in the database
-  const user = await c.env.DB.prepare('SELECT id, email, is_banned FROM users WHERE id = ?')
+  const user = await DB.prepare('SELECT id, email, is_banned FROM users WHERE id = ?')
     .bind(payload.id)
     .first<{ id: string; email: string; is_banned: number }>();
 
@@ -169,7 +159,7 @@ const REPORTS_TO_FLAG_JOB = 3;
 // Flagged jobs a contributor may accumulate before being auto-banned.
 const FLAGS_TO_BAN_USER = 5;
 
-// Upper bounds on stored job fields, to keep junk/oversized rows out of D1.
+// Upper bounds on stored job fields, to keep junk/oversized rows out of Postgres.
 const MAX_FIELD_LENGTH = 512;
 const MAX_URL_LENGTH = 2048;
 
@@ -211,7 +201,7 @@ app.post('/api/auth/login', async (c) => {
     return c.json({ error: 'Missing idp_token or sso_provider' }, 400);
   }
 
-  if (sso_provider === 'google' && !c.env.GOOGLE_CLIENT_ID) {
+  if (sso_provider === 'google' && !process.env.GOOGLE_CLIENT_ID) {
     return c.json({ error: 'Server misconfiguration: GOOGLE_CLIENT_ID not set' }, 500);
   }
 
@@ -226,7 +216,7 @@ app.post('/api/auth/login', async (c) => {
       // The tokeninfo endpoint proves the token is *a* valid Google-signed token,
       // not that it was issued for THIS app — without checking `aud`, a token
       // minted for any other Google-sign-in-enabled site would be accepted here.
-      if (data.aud !== c.env.GOOGLE_CLIENT_ID) {
+      if (data.aud !== process.env.GOOGLE_CLIENT_ID) {
         throw new Error('Token audience mismatch');
       }
       if (data.email_verified !== 'true' && data.email_verified !== true) {
@@ -242,8 +232,8 @@ app.post('/api/auth/login', async (c) => {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          client_id: c.env.GITHUB_CLIENT_ID,
-          client_secret: c.env.GITHUB_CLIENT_SECRET,
+          client_id: process.env.GITHUB_CLIENT_ID,
+          client_secret: process.env.GITHUB_CLIENT_SECRET,
           code: idp_token
         })
       });
@@ -295,17 +285,17 @@ app.post('/api/auth/login', async (c) => {
     return c.json({ error: 'Failed to extract email from Identity Provider' }, 400);
   }
 
-  let user = await c.env.DB.prepare('SELECT * FROM users WHERE email = ?')
+  let user = await DB.prepare('SELECT * FROM users WHERE email = ?')
     .bind(email)
     .first();
 
   let userId: string;
-  const clientIp = c.req.header('cf-connecting-ip') || 'unknown';
+  const clientIp = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for') || 'unknown';
 
   if (!user) {
     // Register new user and award the initial Give-to-Get signup bonus
     userId = crypto.randomUUID();
-    await c.env.DB.prepare(
+    await DB.prepare(
       'INSERT INTO users (id, email, sso_provider, current_credits, last_login_ip) VALUES (?, ?, ?, ?, ?)'
     )
       .bind(userId, email, sso_provider, SIGNUP_BONUS, clientIp)
@@ -313,7 +303,7 @@ app.post('/api/auth/login', async (c) => {
   } else {
     userId = user.id as string;
     // Update the user's latest IP address on login
-    await c.env.DB.prepare('UPDATE users SET last_login_ip = ? WHERE id = ?')
+    await DB.prepare('UPDATE users SET last_login_ip = ? WHERE id = ?')
       .bind(clientIp, userId)
       .run();
   }
@@ -326,7 +316,7 @@ app.post('/api/auth/login', async (c) => {
   };
   
   // Sign the token with the internal PRIVATE_KEY using RS256
-  const token = await sign(payload, c.env.PRIVATE_KEY, 'RS256');
+  const token = await sign(payload, process.env.PRIVATE_KEY, 'RS256');
 
   return c.json({
     token: token,
@@ -361,7 +351,7 @@ app.post('/api/jobs/push', async (c) => {
     return c.json({ error: 'Invalid payload, expected array of jobs' }, 400);
   }
 
-  // Prevent CPU and memory exhaustion on the Cloudflare Free Tier Worker
+  // Prevent CPU and memory exhaustion on the API server
   if (jobs.length > 1000) {
     return c.json({ error: 'Payload too large. Maximum 1000 jobs allowed per request.' }, 413);
   }
@@ -390,9 +380,9 @@ app.post('/api/jobs/push', async (c) => {
   let creditsEarned = 0;
   let failed = 0;
 
-  // Utilize D1 Batch API to execute multiple inserts in a single network transaction
+  // Utilize database batching to execute multiple inserts in a single network transaction
   const stmts = [];
-  const insertJobStmt = c.env.DB.prepare(
+  const insertJobStmt = DB.prepare(
     // INSERT OR IGNORE skips the insert if the URL violates the UNIQUE constraint
     'INSERT OR IGNORE INTO jobs (id, company, title, location, url, scraped_by_user_id) VALUES (?, ?, ?, ?, ?, ?)'
   );
@@ -405,13 +395,13 @@ app.post('/api/jobs/push', async (c) => {
   }
 
   if (stmts.length > 0) {
-    // Cloudflare D1 restricts batch calls to 100 statements maximum.
+    // Restrict batch calls to 100 statements maximum.
     // We slice the massive array into chunks of 100 and execute them sequentially.
     const CHUNK_SIZE = 100;
     for (let i = 0; i < stmts.length; i += CHUNK_SIZE) {
       const chunk = stmts.slice(i, i + CHUNK_SIZE);
       try {
-        const results = await c.env.DB.batch(chunk);
+        const results = await DB.batch(chunk);
 
         // Tally up credits based on how many rows were actually written (ignoring duplicates)
         for (const result of results) {
@@ -420,7 +410,7 @@ app.post('/api/jobs/push', async (c) => {
           }
         }
       } catch (err) {
-        // A chunk is one atomic D1 transaction: if it throws for any reason,
+        // A chunk is one atomic database transaction: if it throws for any reason,
         // none of its rows were written. Don't let that abort the whole request
         // and lose the credit already earned by prior successful chunks.
         failed += chunk.length;
@@ -438,7 +428,7 @@ app.post('/api/jobs/push', async (c) => {
   let capReached = false;
 
   for (let attempt = 0; attempt < 3 && creditsEarned > 0; attempt++) {
-    const quotaRow = await c.env.DB.prepare(
+    const quotaRow = await DB.prepare(
       'SELECT pushed_today, last_push_date FROM users WHERE id = ?'
     )
       .bind(user.id)
@@ -456,7 +446,7 @@ app.post('/api/jobs/push', async (c) => {
       break;
     }
 
-    const result = await c.env.DB.prepare(
+    const result = await DB.prepare(
       `UPDATE users
        SET current_credits = current_credits + ?,
            total_pushed = total_pushed + ?,
@@ -526,7 +516,7 @@ app.get('/api/jobs/pull', async (c) => {
   // fails (0 rows changed) and we retry with freshly-read state instead of
   // overspending credits or double-spending the daily quota.
   for (let attempt = 0; attempt < 3 && !reservation; attempt++) {
-    const userData = await c.env.DB.prepare(
+    const userData = await DB.prepare(
       'SELECT current_credits, pulled_today, last_pull_date FROM users WHERE id = ?'
     )
       .bind(user.id)
@@ -550,7 +540,7 @@ app.get('/api/jobs/pull', async (c) => {
         warningMessage = `Requested ${limitParam} jobs but capped at the hard limit of 100 jobs per request.`;
       }
 
-      const result = await c.env.DB.prepare(
+      const result = await DB.prepare(
         `UPDATE users
          SET current_credits = current_credits - ?,
              pulled_today = CASE WHEN last_pull_date = ? THEN pulled_today + ? ELSE ? END,
@@ -578,7 +568,7 @@ app.get('/api/jobs/pull', async (c) => {
           ? `Requested ${limitParam} jobs but limited to ${want} due to your remaining daily free quota.`
           : undefined;
 
-      const result = await c.env.DB.prepare(
+      const result = await DB.prepare(
         `UPDATE users
          SET pulled_today = CASE WHEN last_pull_date = ? THEN pulled_today + ? ELSE ? END,
              last_pull_date = ?
@@ -603,7 +593,7 @@ app.get('/api/jobs/pull', async (c) => {
 
   // Exclude jobs this user has already pulled before so consuming the feed
   // actually advances instead of handing back the same newest N jobs forever.
-  const candidates = await c.env.DB.prepare(
+  const candidates = await DB.prepare(
     `SELECT id, company, title, location, url, created_at FROM jobs
      WHERE is_flagged = 0
        AND id NOT IN (SELECT job_id FROM pulled_jobs WHERE user_id = ?)
@@ -621,10 +611,10 @@ app.get('/api/jobs/pull', async (c) => {
   // pulls from being re-served).
   let confirmed: any[] = [];
   if (candidates.results.length > 0) {
-    const markSeenStmt = c.env.DB.prepare(
+    const markSeenStmt = DB.prepare(
       'INSERT OR IGNORE INTO pulled_jobs (user_id, job_id) VALUES (?, ?)'
     );
-    const claimResults = await c.env.DB.batch(
+    const claimResults = await DB.batch(
       candidates.results.map((job: any) => markSeenStmt.bind(user.id, job.id))
     );
     confirmed = candidates.results.filter((_: any, i: number) => claimResults[i].meta.changes > 0);
@@ -638,13 +628,13 @@ app.get('/api/jobs/pull', async (c) => {
   // claim above), so users aren't charged for jobs they didn't actually receive.
   if (unused > 0) {
     if (reservation.fromCredits) {
-      await c.env.DB.prepare(
+      await DB.prepare(
         'UPDATE users SET current_credits = current_credits + ?, pulled_today = pulled_today - ? WHERE id = ?'
       )
         .bind(unused, unused, user.id)
         .run();
     } else {
-      await c.env.DB.prepare(
+      await DB.prepare(
         'UPDATE users SET pulled_today = pulled_today - ? WHERE id = ?'
       )
         .bind(unused, user.id)
@@ -653,7 +643,7 @@ app.get('/api/jobs/pull', async (c) => {
   }
 
   if (jobsReturnedCount > 0) {
-    await c.env.DB.prepare('UPDATE users SET total_pulled = total_pulled + ? WHERE id = ?')
+    await DB.prepare('UPDATE users SET total_pulled = total_pulled + ? WHERE id = ?')
       .bind(jobsReturnedCount, user.id)
       .run();
   }
@@ -697,7 +687,7 @@ app.post('/api/jobs/report', async (c) => {
     return c.json({ error: 'Invalid reason' }, 400);
   }
 
-  const job = await c.env.DB.prepare(
+  const job = await DB.prepare(
     'SELECT id, scraped_by_user_id, is_flagged FROM jobs WHERE id = ?'
   )
     .bind(job_id)
@@ -709,7 +699,7 @@ app.post('/api/jobs/report', async (c) => {
 
   // Gate reporting on having actually received the job. Without this, reporting
   // becomes a free weapon against any contributor.
-  const hasPulled = await c.env.DB.prepare(
+  const hasPulled = await DB.prepare(
     'SELECT 1 FROM pulled_jobs WHERE user_id = ? AND job_id = ?'
   )
     .bind(user.id, job_id)
@@ -719,7 +709,7 @@ app.post('/api/jobs/report', async (c) => {
     return c.json({ error: 'You can only report a job you have pulled' }, 403);
   }
 
-  const insert = await c.env.DB.prepare(
+  const insert = await DB.prepare(
     'INSERT OR IGNORE INTO job_reports (job_id, reporter_user_id, reason) VALUES (?, ?, ?)'
   )
     .bind(job_id, user.id, typeof reason === 'string' ? reason.slice(0, MAX_FIELD_LENGTH) : null)
@@ -729,7 +719,7 @@ app.post('/api/jobs/report', async (c) => {
     return c.json({ success: true, message: 'You have already reported this job.' });
   }
 
-  const countRow = await c.env.DB.prepare(
+  const countRow = await DB.prepare(
     'SELECT COUNT(*) AS report_count FROM job_reports WHERE job_id = ?'
   )
     .bind(job_id)
@@ -743,7 +733,7 @@ app.post('/api/jobs/report', async (c) => {
   // guard makes this idempotent under concurrent reports, so the contributor
   // can't be penalised twice for the same job.
   if (reportCount >= REPORTS_TO_FLAG_JOB && job.is_flagged === 0) {
-    const flagResult = await c.env.DB.prepare(
+    const flagResult = await DB.prepare(
       'UPDATE jobs SET is_flagged = 1 WHERE id = ? AND is_flagged = 0'
     )
       .bind(job_id)
@@ -755,7 +745,7 @@ app.post('/api/jobs/report', async (c) => {
       // Claw back the credit earned for this job and record a strike. Credits
       // are floored at 0 rather than going negative, which would silently push
       // the contributor into the free-quota branch of the pull economy.
-      const strike = await c.env.DB.prepare(
+      const strike = await DB.prepare(
         `UPDATE users
          SET flagged_count = flagged_count + 1,
              current_credits = MAX(0, current_credits - 1)
@@ -766,7 +756,7 @@ app.post('/api/jobs/report', async (c) => {
         .first<{ flagged_count: number }>();
 
       if (strike && strike.flagged_count >= FLAGS_TO_BAN_USER) {
-        const ban = await c.env.DB.prepare(
+        const ban = await DB.prepare(
           'UPDATE users SET is_banned = 1 WHERE id = ? AND is_banned = 0'
         )
           .bind(job.scraped_by_user_id)
@@ -792,7 +782,7 @@ app.post('/api/jobs/report', async (c) => {
 app.get('/api/me', async (c) => {
   const user = c.get('user');
 
-  const userData = await c.env.DB.prepare(
+  const userData = await DB.prepare(
     `SELECT id, email, current_credits, total_pushed, total_pulled,
             pulled_today, last_pull_date, pushed_today, last_push_date, flagged_count
      FROM users WHERE id = ?`
@@ -834,21 +824,24 @@ app.get('/api/me', async (c) => {
 /**
  * GET /health
  * Unauthenticated liveness/readiness probe for uptime monitoring. Also verifies
- * the D1 binding actually answers, since a healthy Worker with a broken database
+ * the database actually answers, since a healthy server with a broken database
  * binding is not actually serving.
  */
 app.get('/health', async (c) => {
+  const version = process.env.GIT_COMMIT_HASH || 'unknown';
   try {
-    await c.env.DB.prepare('SELECT 1').first();
+    await DB.prepare('SELECT 1').first();
     return c.json({ status: 'ok', database: 'ok' });
+    return c.json({ status: 'ok', database: 'ok', version });
   } catch {
     return c.json({ status: 'degraded', database: 'unreachable' }, 503);
+    return c.json({ status: 'degraded', database: 'unreachable', version }, 503);
   }
 });
 
 /**
  * --- Global Error Handler ---
- * Safety net for unexpected exceptions (e.g. D1 errors) so clients always get
+ * Safety net for unexpected exceptions (e.g. database errors) so clients always get
  * clean JSON instead of Hono's default error response.
  */
 app.onError((err, c) => {
@@ -856,4 +849,8 @@ app.onError((err, c) => {
   return c.json({ error: 'Internal server error' }, 500);
 });
 
-export default app;
+import { serve } from "@hono/node-server";
+
+const port = process.env.PORT ? parseInt(process.env.PORT) : 3000;
+console.log(`Server is running on port ${port}`);
+serve({ fetch: app.fetch, port });

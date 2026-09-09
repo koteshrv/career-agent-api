@@ -9,3 +9,4 @@ dist/
 *.db
 
 wrangler.prod.toml
+data.sql

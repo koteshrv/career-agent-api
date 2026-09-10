@@ -18,7 +18,7 @@ type Variables = {
 /**
  * Initialize the Hono application with strict typing for bindings and variables.
  */
-const app = Fastify({ logger: true });
+const app = Fastify({ logger: true, trustProxy: true });
 declare module 'fastify' {
   interface FastifyRequest {
     user?: { id: string; email: string; };

@@ -359,7 +359,7 @@ app.post('/api/jobs/push', { preHandler: authMiddleware }, async (request, reply
   const stmts = [];
   const insertJobStmt = DB.prepare(
     // INSERT OR IGNORE skips the insert if the URL violates the UNIQUE constraint
-    'INSERT OR IGNORE INTO jobs (id, company, title, location, url, scraped_by_user_id) VALUES (?, ?, ?, ?, ?, ?)'
+    'INSERT INTO jobs (id, company, title, location, url, scraped_by_user_id) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING'
   );
 
   for (const job of validJobs) {
@@ -564,7 +564,7 @@ app.get('/api/jobs/pull', { preHandler: authMiddleware }, async (request, reply)
   // actually advances instead of handing back the same newest N jobs forever.
   const candidates = await DB.prepare(
     `SELECT id, company, title, location, url, created_at FROM jobs
-     WHERE is_flagged = 0
+     WHERE is_flagged = false
        AND id NOT IN (SELECT job_id FROM pulled_jobs WHERE user_id = ?)
      ORDER BY created_at DESC LIMIT ?`
   )
@@ -581,7 +581,7 @@ app.get('/api/jobs/pull', { preHandler: authMiddleware }, async (request, reply)
   let confirmed: any[] = [];
   if (candidates.results.length > 0) {
     const markSeenStmt = DB.prepare(
-      'INSERT OR IGNORE INTO pulled_jobs (user_id, job_id) VALUES (?, ?)'
+      'INSERT INTO pulled_jobs (user_id, job_id) VALUES (?, ?) ON CONFLICT DO NOTHING'
     );
     const claimResults = await DB.batch(
       candidates.results.map((job: any) => markSeenStmt.bind(user.id, job.id))
@@ -660,7 +660,7 @@ app.post('/api/jobs/report', { preHandler: authMiddleware }, async (request, rep
     'SELECT id, scraped_by_user_id, is_flagged FROM jobs WHERE id = ?'
   )
     .bind(job_id)
-    .first<{ id: string; scraped_by_user_id: string; is_flagged: number }>();
+    .first<{ id: string; scraped_by_user_id: string; is_flagged: boolean }>();
 
   if (!job) {
     return reply.status(404).send({ error: 'Job not found' });
@@ -679,7 +679,7 @@ app.post('/api/jobs/report', { preHandler: authMiddleware }, async (request, rep
   }
 
   const insert = await DB.prepare(
-    'INSERT OR IGNORE INTO job_reports (job_id, reporter_user_id, reason) VALUES (?, ?, ?)'
+    'INSERT INTO job_reports (job_id, reporter_user_id, reason) VALUES (?, ?, ?) ON CONFLICT DO NOTHING'
   )
     .bind(job_id, user.id, typeof reason === 'string' ? reason.slice(0, MAX_FIELD_LENGTH) : null)
     .run();
@@ -698,12 +698,12 @@ app.post('/api/jobs/report', { preHandler: authMiddleware }, async (request, rep
   let jobFlagged = false;
   let contributorBanned = false;
 
-  // Flag exactly once, on the transition past the threshold. The is_flagged = 0
+  // Flag exactly once, on the transition past the threshold. The is_flagged = false
   // guard makes this idempotent under concurrent reports, so the contributor
   // can't be penalised twice for the same job.
-  if (reportCount >= REPORTS_TO_FLAG_JOB && job.is_flagged === 0) {
+  if (reportCount >= REPORTS_TO_FLAG_JOB && job.is_flagged === false) {
     const flagResult = await DB.prepare(
-      'UPDATE jobs SET is_flagged = 1 WHERE id = ? AND is_flagged = 0'
+      'UPDATE jobs SET is_flagged = true WHERE id = ? AND is_flagged = false'
     )
       .bind(job_id)
       .run();
@@ -726,7 +726,7 @@ app.post('/api/jobs/report', { preHandler: authMiddleware }, async (request, rep
 
       if (strike && strike.flagged_count >= FLAGS_TO_BAN_USER) {
         const ban = await DB.prepare(
-          'UPDATE users SET is_banned = 1 WHERE id = ? AND is_banned = 0'
+          'UPDATE users SET is_banned = true WHERE id = ? AND is_banned = false'
         )
           .bind(job.scraped_by_user_id)
           .run();

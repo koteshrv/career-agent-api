@@ -1,11 +1,9 @@
 import "dotenv/config";
-import { Hono } from 'hono';
+import Fastify, { FastifyRequest, FastifyReply } from 'fastify';
+import jwt from 'jsonwebtoken';
 import { DB } from "./db";
 import { checkRateLimit } from "./redis";
-import type { MiddlewareHandler } from 'hono';
-import { sign, verify } from 'hono/jwt';
-import { cors } from 'hono/cors';
-import { logger } from 'hono/logger';
+import cors from '@fastify/cors';
 
 /**
  * Defines data that can be passed between middleware and route handlers.
@@ -20,10 +18,14 @@ type Variables = {
 /**
  * Initialize the Hono application with strict typing for bindings and variables.
  */
-const app = new Hono<{ Variables: Variables }>();
+const app = Fastify({ logger: true });
+declare module 'fastify' {
+  interface FastifyRequest {
+    user?: { id: string; email: string; };
+  }
+}
 
 // Add request logging
-app.use('*', logger());
 
 /**
  * --- CORS Configuration ---
@@ -31,48 +33,44 @@ app.use('*', logger());
  * Reads from the ALLOWED_ORIGIN binding (comma-separated) so prod/dev frontends
  * can differ without a code change; defaults to the local dev frontend.
  */
-app.use('*', cors({
-  origin: (origin, c) => {
+app.register(cors, {
+  origin: (origin, cb) => {
     const allowed = (process.env.ALLOWED_ORIGIN || 'http://localhost:5173')
       .split(',')
       .map((o: string) => o.trim());
-    return origin && allowed.includes(origin) ? origin : allowed[0];
+    if (!origin || allowed.includes(origin)) { cb(null, true); } else { cb(null, allowed[0]); }
   },
-  allowHeaders: ['Content-Type', 'Authorization'],
-  allowMethods: ['POST', 'GET', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  methods: ['POST', 'GET', 'OPTIONS'],
   maxAge: 600,
-}));
+});
 
 
 /**
  * --- Rate Limiting Middleware ---
  */
-app.use('*', async (c, next) => {
-  const ip = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for') || 'unknown';
+app.addHook('onRequest', async (request, reply) => {
+  const ip = (request.headers['cf-connecting-ip'] || request.headers['x-forwarded-for'] || request.ip || 'unknown') as string;
   
   if (ip !== 'unknown') {
     // 100 requests per 60 seconds
     const isAllowed = await checkRateLimit(ip, 100, 60);
     if (!isAllowed) {
-      return c.json({ error: 'Too Many Requests' }, 429);
+      return reply.status(429).send({ error: 'Too Many Requests' });
     }
   }
 
-  await next();
 });
 /**
  * --- JWT Authentication Middleware ---
  * Intercepts requests to protected routes, cryptographically verifies the JWT,
  * and ensures the user exists and is not banned in the database.
  */
-const authMiddleware: MiddlewareHandler<{ Variables: Variables }> = async (
-  c,
-  next
-) => {
-  const authHeader = c.req.header('Authorization');
+const authMiddleware = async (request: FastifyRequest, reply: FastifyReply) => {
+  const authHeader = request.headers.authorization;
 
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return c.json({ error: 'Unauthorized' }, 401);
+    return reply.status(401).send({ error: 'Unauthorized' });
   }
 
   const token = authHeader.split(' ')[1];
@@ -85,16 +83,16 @@ const authMiddleware: MiddlewareHandler<{ Variables: Variables }> = async (
   try {
     // Verify the JWT signature using the PUBLIC_KEY and RS256 algorithm.
     // Throws an error if the token is forged, tampered with, or expired.
-    payload = await verify(token, process.env.PUBLIC_KEY!, 'RS256');
+    payload = jwt.verify(token, process.env.PUBLIC_KEY!, { algorithms: ['RS256'] }) as any;
   } catch {
-    return c.json({ error: 'Invalid token' }, 401);
+    return reply.status(401).send({ error: 'Invalid token' });
   }
 
   // A validly-signed token still has to carry a usable subject. Without this,
   // a token missing `id` reaches the database as a bind of `undefined`, which throws and
   // surfaces as a confusing 500 instead of a plain 401.
   if (typeof payload.id !== 'string' || payload.id.length === 0) {
-    return c.json({ error: 'Invalid token' }, 401);
+    return reply.status(401).send({ error: 'Invalid token' });
   }
 
   // Validate user state in the database
@@ -103,16 +101,15 @@ const authMiddleware: MiddlewareHandler<{ Variables: Variables }> = async (
     .first<{ id: string; email: string; is_banned: number }>();
 
   if (!user) {
-    return c.json({ error: 'User not found' }, 401);
+    return reply.status(401).send({ error: 'User not found' });
   }
 
   if (user.is_banned) {
-    return c.json({ error: 'User is banned' }, 403);
+    return reply.status(403).send({ error: 'User is banned' });
   }
 
   // Attach user payload to the request context for downstream routes
-  c.set('user', { id: user.id, email: user.email });
-  await next();
+    request.user = { id: user.id, email: user.email };
 };
 
 /**
@@ -168,21 +165,21 @@ const isValidJobUrl = (value: string): boolean => {
  * an IdP-issued JWT (e.g., from Microsoft Entra or Google) against public JWKS before
  * issuing the internal API JWT.
  */
-app.post('/api/auth/login', async (c) => {
+app.post('/api/auth/login', async (request, reply) => {
   let body: any;
   try {
-    body = await c.req.json();
+    body = await Promise.resolve(request.body);
   } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400);
+    return reply.status(400).send({ error: 'Invalid JSON body' });
   }
   const { idp_token, sso_provider } = body;
 
   if (!idp_token || !sso_provider) {
-    return c.json({ error: 'Missing idp_token or sso_provider' }, 400);
+    return reply.status(400).send({ error: 'Missing idp_token or sso_provider' });
   }
 
   if (sso_provider === 'google' && !process.env.GOOGLE_CLIENT_ID) {
-    return c.json({ error: 'Server misconfiguration: GOOGLE_CLIENT_ID not set' }, 500);
+    return reply.status(500).send({ error: 'Server misconfiguration: GOOGLE_CLIENT_ID not set' });
   }
 
   let email: string | null = null;
@@ -249,7 +246,7 @@ app.post('/api/auth/login', async (c) => {
         email = data.email;
       }
     } else {
-      return c.json({ error: 'Unsupported SSO provider (Only Google/GitHub supported)' }, 400);
+      return reply.status(400).send({ error: 'Unsupported SSO provider (Only Google/GitHub supported)' });
     }
   } catch (err) {
     // Logged server-side only — the client gets a generic message on purpose
@@ -258,11 +255,11 @@ app.post('/api/auth/login', async (c) => {
     // otherwise vanishes, which makes this endpoint painful to debug from the
     // outside. Check `wrangler tail` / the dashboard logs for this line.
     console.error('Login verification failed:', sso_provider, err instanceof Error ? err.message : err);
-    return c.json({ error: 'Identity Provider verification failed. Token invalid.' }, 401);
+    return reply.status(401).send({ error: 'Identity Provider verification failed. Token invalid.' });
   }
 
   if (!email) {
-    return c.json({ error: 'Failed to extract email from Identity Provider' }, 400);
+    return reply.status(400).send({ error: 'Failed to extract email from Identity Provider' });
   }
 
   let user = await DB.prepare('SELECT * FROM users WHERE email = ?')
@@ -270,7 +267,7 @@ app.post('/api/auth/login', async (c) => {
     .first();
 
   let userId: string;
-  const clientIp = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for') || 'unknown';
+  const clientIp = request.headers('cf-connecting-ip') || request.headers('x-forwarded-for') || 'unknown';
 
   if (!user) {
     // Register new user and award the initial Give-to-Get signup bonus
@@ -296,9 +293,9 @@ app.post('/api/auth/login', async (c) => {
   };
   
   // Sign the token with the internal PRIVATE_KEY using RS256
-  const token = await sign(payload, process.env.PRIVATE_KEY!, 'RS256');
+  const token = jwt.sign(payload, process.env.PRIVATE_KEY!, { algorithm: 'RS256' });
 
-  return c.json({
+  return reply.status(403).send({
     token: token,
     access_token: token, // Kept for backward compatibility
     token_type: 'bearer',
@@ -309,31 +306,29 @@ app.post('/api/auth/login', async (c) => {
 /**
  * Apply the Authentication Middleware to all Job Economy routes and the account endpoint
  */
-app.use('/api/jobs/*', authMiddleware);
-app.use('/api/me', authMiddleware);
 
 /**
  * POST /api/jobs/push
  * Give-to-Get Economy: Users upload scraped jobs here to earn API credits.
  * 1 unique job successfully inserted = 1 credit earned.
  */
-app.post('/api/jobs/push', async (c) => {
-  const user = c.get('user');
+app.post('/api/jobs/push', { preHandler: authMiddleware }, async (request, reply) => {
+  const user = request.user!;
   let body: any;
   try {
-    body = await c.req.json();
+    body = await Promise.resolve(request.body);
   } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400);
+    return reply.status(400).send({ error: 'Invalid JSON body' });
   }
   const { jobs } = body;
 
   if (!jobs || !Array.isArray(jobs)) {
-    return c.json({ error: 'Invalid payload, expected array of jobs' }, 400);
+    return reply.status(400).send({ error: 'Invalid payload, expected array of jobs' });
   }
 
   // Prevent CPU and memory exhaustion on the API server
   if (jobs.length > 1000) {
-    return c.json({ error: 'Payload too large. Maximum 1000 jobs allowed per request.' }, 413);
+    return reply.status(413).send({ error: 'Payload too large. Maximum 1000 jobs allowed per request.' });
   }
 
   const isValidField = (v: unknown): v is string =>
@@ -415,7 +410,7 @@ app.post('/api/jobs/push', async (c) => {
       .first<{ pushed_today: number; last_push_date: string | null }>();
 
     if (!quotaRow) {
-      return c.json({ error: 'User not found' }, 404);
+      return reply.status(404).send({ error: 'User not found' });
     }
 
     const pushedToday = quotaRow.last_push_date === today ? quotaRow.pushed_today : 0;
@@ -457,7 +452,7 @@ app.post('/api/jobs/push', async (c) => {
     // else: a concurrent push consumed the allowance — re-read and recompute
   }
 
-  return c.json({
+  return reply.send({
     success: true,
     message: `Pushed ${jobs.length} jobs.`,
     credits_earned: creditsAwarded,
@@ -477,11 +472,11 @@ app.post('/api/jobs/push', async (c) => {
  * Give-to-Get Economy: Users consume jobs here, spending their API credits.
  * 1 job pulled = 1 credit spent. Falls back to a strict daily free quota if out of credits.
  */
-app.get('/api/jobs/pull', async (c) => {
-  const user = c.get('user');
-  const limitParam = parseInt(c.req.query('limit') || '10', 10);
+app.get('/api/jobs/pull', { preHandler: authMiddleware }, async (request, reply) => {
+  const user = request.user!;
+  const limitParam = parseInt((request.query as any).limit || '10', 10);
   if (!Number.isFinite(limitParam)) {
-    return c.json({ error: 'Invalid limit parameter' }, 400);
+    return reply.status(400).send({ error: 'Invalid limit parameter' });
   }
   const limit = Math.min(Math.max(limitParam, 1), 100);
   const today = new Date().toISOString().split('T')[0];
@@ -503,7 +498,7 @@ app.get('/api/jobs/pull', async (c) => {
       .first();
 
     if (!userData) {
-      return c.json({ error: 'User not found' }, 404);
+      return reply.status(404).send({ error: 'User not found' });
     }
 
     const credits = userData.current_credits as number;
@@ -537,10 +532,7 @@ app.get('/api/jobs/pull', async (c) => {
     } else {
       // Freerider State: blocked once the daily free quota is exhausted
       if (pulledToday >= DAILY_QUOTA) {
-        return c.json(
-          { error: 'Daily quota exceeded. Push more jobs to earn credits.' },
-          403
-        );
+        return reply.send({ error: 'Daily quota exceeded. Push more jobs to earn credits.' });
       }
       const want = Math.min(limit, DAILY_QUOTA - pulledToday);
       const warningMessage =
@@ -565,10 +557,7 @@ app.get('/api/jobs/pull', async (c) => {
   }
 
   if (!reservation) {
-    return c.json(
-      { error: 'Could not process pull request due to concurrent updates, please retry.' },
-      409
-    );
+    return reply.status(409).send({ error: 'Could not process pull request due to concurrent updates, please retry.' });
   }
 
   // Exclude jobs this user has already pulled before so consuming the feed
@@ -628,7 +617,7 @@ app.get('/api/jobs/pull', async (c) => {
       .run();
   }
 
-  return c.json({
+  return reply.send({
     success: true,
     warning: reservation.warningMessage,
     jobs: confirmed,
@@ -649,22 +638,22 @@ app.get('/api/jobs/pull', async (c) => {
  * earned credit for it is clawed back, and a strike is recorded; at
  * FLAGS_TO_BAN_USER strikes the contributor is auto-banned.
  */
-app.post('/api/jobs/report', async (c) => {
-  const user = c.get('user');
+app.post('/api/jobs/report', { preHandler: authMiddleware }, async (request, reply) => {
+  const user = request.user!;
   let body: any;
   try {
-    body = await c.req.json();
+    body = await Promise.resolve(request.body);
   } catch {
-    return c.json({ error: 'Invalid JSON body' }, 400);
+    return reply.status(400).send({ error: 'Invalid JSON body' });
   }
 
   const { job_id, reason } = body;
 
   if (typeof job_id !== 'string' || job_id.length === 0) {
-    return c.json({ error: 'Missing or invalid job_id' }, 400);
+    return reply.status(400).send({ error: 'Missing or invalid job_id' });
   }
   if (reason !== undefined && reason !== null && typeof reason !== 'string') {
-    return c.json({ error: 'Invalid reason' }, 400);
+    return reply.status(400).send({ error: 'Invalid reason' });
   }
 
   const job = await DB.prepare(
@@ -674,7 +663,7 @@ app.post('/api/jobs/report', async (c) => {
     .first<{ id: string; scraped_by_user_id: string; is_flagged: number }>();
 
   if (!job) {
-    return c.json({ error: 'Job not found' }, 404);
+    return reply.status(404).send({ error: 'Job not found' });
   }
 
   // Gate reporting on having actually received the job. Without this, reporting
@@ -686,7 +675,7 @@ app.post('/api/jobs/report', async (c) => {
     .first();
 
   if (!hasPulled) {
-    return c.json({ error: 'You can only report a job you have pulled' }, 403);
+    return reply.status(403).send({ error: 'You can only report a job you have pulled' });
   }
 
   const insert = await DB.prepare(
@@ -696,7 +685,7 @@ app.post('/api/jobs/report', async (c) => {
     .run();
 
   if (insert.meta.changes === 0) {
-    return c.json({ success: true, message: 'You have already reported this job.' });
+    return reply.send({ success: true, message: 'You have already reported this job.' });
   }
 
   const countRow = await DB.prepare(
@@ -746,7 +735,7 @@ app.post('/api/jobs/report', async (c) => {
     }
   }
 
-  return c.json({
+  return reply.send({
     success: true,
     report_count: reportCount,
     reports_needed_to_flag: REPORTS_TO_FLAG_JOB,
@@ -759,8 +748,8 @@ app.post('/api/jobs/report', async (c) => {
  * GET /api/me
  * Returns the authenticated user's current Give-to-Get economy balance and stats.
  */
-app.get('/api/me', async (c) => {
-  const user = c.get('user');
+app.get('/api/me', { preHandler: authMiddleware }, async (request, reply) => {
+  const user = request.user!;
 
   const userData = await DB.prepare(
     `SELECT id, email, current_credits, total_pushed, total_pulled,
@@ -782,19 +771,17 @@ app.get('/api/me', async (c) => {
     }>();
 
   if (!userData) {
-    return c.json({ error: 'User not found' }, 404);
+    return reply.status(404).send({ error: 'User not found' });
   }
 
   const today = new Date().toISOString().split('T')[0];
   const pulledToday = userData.last_pull_date === today ? userData.pulled_today : 0;
   const pushedToday = userData.last_push_date === today ? userData.pushed_today : 0;
 
-  return c.json({
+  return reply.send({
     id: userData.id,
     email: userData.email,
     current_credits: userData.current_credits,
-    total_pushed: userData.total_pushed,
-    total_pulled: userData.total_pulled,
     daily_quota_remaining: Math.max(0, DAILY_QUOTA - pulledToday),
     daily_push_credits_remaining: Math.max(0, DAILY_PUSH_CREDIT_CAP - pushedToday),
     flagged_count: userData.flagged_count,
@@ -803,34 +790,31 @@ app.get('/api/me', async (c) => {
 
 /**
  * GET /health
- * Unauthenticated liveness/readiness probe for uptime monitoring. Also verifies
- * the database actually answers, since a healthy server with a broken database
- * binding is not actually serving.
+ * Unauthenticated liveness/readiness probe for uptime monitoring.
  */
-app.get('/health', async (c) => {
+app.get('/health', async (request, reply) => {
   const version = process.env.GIT_COMMIT_HASH || 'unknown';
   try {
     await DB.prepare('SELECT 1').first();
-    return c.json({ status: 'ok', database: 'ok' });
-    return c.json({ status: 'ok', database: 'ok', version });
+    return reply.status(200).send({ status: 'ok', database: 'ok', version });
   } catch {
-    return c.json({ status: 'degraded', database: 'unreachable' }, 503);
-    return c.json({ status: 'degraded', database: 'unreachable', version }, 503);
+    return reply.status(503).send({ status: 'degraded', database: 'unreachable', version });
   }
 });
 
 /**
  * --- Global Error Handler ---
- * Safety net for unexpected exceptions (e.g. database errors) so clients always get
- * clean JSON instead of Hono's default error response.
  */
-app.onError((err, c) => {
-  console.error(err);
-  return c.json({ error: 'Internal server error' }, 500);
+app.setErrorHandler((error, request, reply) => {
+  request.log.error(error);
+  return reply.status(500).send({ error: 'Internal server error', requestId: request.id });
 });
 
-import { serve } from "@hono/node-server";
-
 const port = process.env.PORT ? parseInt(process.env.PORT) : 3000;
-console.log(`Server is running on port ${port}`);
-serve({ fetch: app.fetch, port });
+app.listen({ port, host: '0.0.0.0' }, (err, address) => {
+  if (err) {
+    app.log.error(err);
+    process.exit(1);
+  }
+  console.log(`Server is running on ${address}`);
+});

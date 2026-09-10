@@ -295,7 +295,7 @@ app.post('/api/auth/login', async (request, reply) => {
   // Sign the token with the internal PRIVATE_KEY using RS256
   const token = jwt.sign(payload, process.env.PRIVATE_KEY!, { algorithm: 'RS256' });
 
-  return reply.status(403).send({
+  return reply.status(200).send({
     token: token,
     access_token: token, // Kept for backward compatibility
     token_type: 'bearer',

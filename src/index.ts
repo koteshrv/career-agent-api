@@ -267,7 +267,7 @@ app.post('/api/auth/login', async (request, reply) => {
     .first();
 
   let userId: string;
-  const clientIp = request.headers('cf-connecting-ip') || request.headers('x-forwarded-for') || 'unknown';
+  const clientIp = request.headers['cf-connecting-ip'] || request.headers['x-forwarded-for'] || 'unknown';
 
   if (!user) {
     // Register new user and award the initial Give-to-Get signup bonus

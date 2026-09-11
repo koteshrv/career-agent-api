@@ -50,7 +50,7 @@ const schemaPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '.
 beforeAll(async () => {
   const { pool } = await import('../src/db');
 
-  await pool.query('DROP TABLE IF EXISTS job_reports, pulled_jobs, jobs, users CASCADE');
+  await pool.query('DROP TABLE IF EXISTS admin_actions, job_reports, pulled_jobs, jobs, users CASCADE');
 
   const schemaSql = readFileSync(schemaPath, 'utf-8');
   const statements = schemaSql

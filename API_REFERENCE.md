@@ -6,9 +6,9 @@ Detailed request/response reference for every endpoint. For a machine-readable v
 
 **Base URL**: the live community instance is `https://api.careeragent.fyi`. Running your own deployment, it's whatever origin you've put it behind, or `http://localhost:3000` locally.
 
-**Authentication**: `Authorization: Bearer <jwt>` on every endpoint marked 🔒 below. Tokens are RS256-signed, expire in 7 days (`expires_in: 604800`), and are obtained from `POST /api/auth/login`.
+**Authentication**: `Authorization: Bearer <jwt>` on every endpoint marked 🔒 below. Tokens are RS256-signed, expire in 7 days (`expires_in: 604800`), and are obtained from `POST /v1/auth/login`.
 
-**Content type**: `Content-Type: application/json` on every request that has a body. Endpoints that take **no** body (`POST /api/auth/logout-all`, `POST /api/admin/users/:id/ban`, `/unban`, `POST /api/admin/jobs/:id/unflag`) must be called **without** a `Content-Type: application/json` header and without a body — Fastify itself rejects an `application/json` content type paired with an empty body (`400 FST_ERR_CTP_EMPTY_JSON_BODY`) before the route handler ever runs.
+**Content type**: `Content-Type: application/json` on every request that has a body. Endpoints that take **no** body (`POST /v1/auth/logout-all`, `POST /v1/admin/users/:id/ban`, `/unban`, `POST /v1/admin/jobs/:id/unflag`) must be called **without** a `Content-Type: application/json` header and without a body — Fastify itself rejects an `application/json` content type paired with an empty body (`400 FST_ERR_CTP_EMPTY_JSON_BODY`) before the route handler ever runs.
 
 **Error shape**: almost every error response is `{ "error": "<message>" }`. The one exception is the global fallback for truly unexpected server-side failures, which also includes a `requestId` for correlating with server logs:
 ```json
@@ -18,7 +18,7 @@ A 4xx that Fastify itself generates before a route handler runs (malformed JSON,
 
 **Rate limiting**: applied globally, before every request, keyed on whichever header the deployment's `TRUSTED_IP_HEADER` env var names (only meaningful when the deployment is actually fronted by a reverse proxy that sets it — absent in plain local development, so no rate limiting applies there):
 - **Global**: 100 requests / 60s per IP, across the whole API.
-- **`POST /api/auth/login` specifically**: an additional, tighter 20 requests / 60s per IP, on top of the global budget — it's the highest-value target for credential stuffing.
+- **`POST /v1/auth/login` specifically**: an additional, tighter 20 requests / 60s per IP, on top of the global budget — it's the highest-value target for credential stuffing.
 
 Either limit returns:
 ```
@@ -34,37 +34,38 @@ Either limit returns:
 ## Table of Contents
 
 **Auth**
-- [`POST /api/auth/login`](#post-apiauthlogin)
-- [`POST /api/auth/logout-all`](#post-apiauthlogout-all-) 🔒
+- [`POST /v1/auth/login`](#post-v1authlogin)
+- [`POST /v1/auth/logout-all`](#post-v1authlogout-all-) 🔒
 
 **Job Economy**
-- [`POST /api/jobs/push`](#post-apijobspush-) 🔒
-- [`GET /api/jobs/pull`](#get-apijobspull-) 🔒
-- [`POST /api/jobs/report`](#post-apijobsreport-) 🔒
+- [`POST /v1/jobs/push`](#post-v1jobspush-) 🔒
+- [`GET /v1/jobs/pull`](#get-v1jobspull-) 🔒
+- [`POST /v1/jobs/report`](#post-v1jobsreport-) 🔒
 
 **Account**
-- [`GET /api/me`](#get-apime-) 🔒
-- [`GET /api/me/export`](#get-apimeexport-) 🔒
-- [`DELETE /api/me`](#delete-apime-) 🔒
+- [`GET /v1/me`](#get-v1me-) 🔒
+- [`GET /v1/me/export`](#get-v1meexport-) 🔒
+- [`DELETE /v1/me`](#delete-v1me-) 🔒
 
 **Admin** (all require an `is_admin` account)
-- [`GET /api/admin/users`](#get-apiadminusers-) 🔒
-- [`GET /api/admin/users/:id`](#get-apiadminusersid-) 🔒
-- [`POST /api/admin/users/:id/credits`](#post-apiadminusersidcredits-) 🔒
-- [`POST /api/admin/users/:id/ban`](#post-apiadminusersidban-) 🔒
-- [`POST /api/admin/users/:id/unban`](#post-apiadminusersidunban-) 🔒
-- [`GET /api/admin/jobs/flagged`](#get-apiadminjobsflagged-) 🔒
-- [`POST /api/admin/jobs/:id/unflag`](#post-apiadminjobsidunflag-) 🔒
-- [`GET /api/admin/jobs/:id/reports`](#get-apiadminjobsidreports-) 🔒
-- [`GET /api/admin/audit-log`](#get-apiadminaudit-log-) 🔒
-- [`GET /api/admin/stats`](#get-apiadminstats-) 🔒
+- [`GET /v1/admin/users`](#get-v1adminusers-) 🔒
+- [`GET /v1/admin/users/:id`](#get-v1adminusersid-) 🔒
+- [`POST /v1/admin/users/:id/credits`](#post-v1adminusersidcredits-) 🔒
+- [`POST /v1/admin/users/:id/ban`](#post-v1adminusersidban-) 🔒
+- [`POST /v1/admin/users/:id/unban`](#post-v1adminusersidunban-) 🔒
+- [`GET /v1/admin/jobs/flagged`](#get-v1adminjobsflagged-) 🔒
+- [`POST /v1/admin/jobs/:id/unflag`](#post-v1adminjobsidunflag-) 🔒
+- [`GET /v1/admin/jobs/:id/reports`](#get-v1adminjobsidreports-) 🔒
+- [`GET /v1/admin/audit-log`](#get-v1adminaudit-log-) 🔒
+- [`GET /v1/admin/stats`](#get-v1adminstats-) 🔒
 
 **System**
+- [`GET /`](#get-)
 - [`GET /health`](#get-health)
 
 ---
 
-## `POST /api/auth/login`
+## `POST /v1/auth/login`
 
 Exchanges a Google ID token or GitHub OAuth code for an internal API JWT. No auth required to call this. Subject to the tighter 20/60s login rate limit in addition to the global one.
 
@@ -112,7 +113,7 @@ Exchanges a Google ID token or GitHub OAuth code for an internal API JWT. No aut
 
 ---
 
-## `POST /api/auth/logout-all` 🔒
+## `POST /v1/auth/logout-all` 🔒
 
 Invalidates **every** JWT previously issued to this account, including the one used to call this endpoint. There is no single-session logout — JWTs are stateless and not tracked individually, so revocation is all-or-nothing per account. Send with **no body and no `Content-Type` header**.
 
@@ -124,7 +125,7 @@ Invalidates **every** JWT previously issued to this account, including the one u
 
 ---
 
-## `POST /api/jobs/push` 🔒
+## `POST /v1/jobs/push` 🔒
 
 Give-to-Get economy: upload scraped jobs, earn 1 credit per **unique**, **valid** job successfully inserted (existing URLs are silently deduplicated, earning nothing).
 
@@ -176,13 +177,16 @@ An entry failing any of the above is **silently skipped** (counted in `invalid_s
 
 ---
 
-## `GET /api/jobs/pull` 🔒
+## `GET /v1/jobs/pull` 🔒
 
-Give-to-Get economy: consume jobs from the shared pool. 1 job returned = 1 credit spent; falls back to a strict daily free quota (50/day) once credits reach 0. Each job is served to a given user at most once, ever.
+Give-to-Get economy: consume jobs from the shared pool. 1 job returned = 1 credit spent; falls back to a strict daily free quota (50/day) once credits reach 0. Each job is served to a given user at most once, ever. Jobs older than 60 days are excluded by default (soft staleness — the rows aren't touched, they're just not served unless asked for).
 
 ### Request
 
-Query parameter `limit` (optional, integer, default 10, clamped to 1–100).
+| Parameter | Type | Required | Notes |
+|---|---|---|---|
+| `limit` | integer (query) | no | Default 10, clamped to 1–100. |
+| `include_stale` | `"true"` (query) | no | Include jobs older than 60 days, which are excluded by default. |
 
 ### Response
 
@@ -215,7 +219,7 @@ Query parameter `limit` (optional, integer, default 10, clamped to 1–100).
 
 ---
 
-## `POST /api/jobs/report` 🔒
+## `POST /v1/jobs/report` 🔒
 
 Community quality control. Report a job you've pulled as fake/dead/spam. Once **3** distinct users report the same job, it's withdrawn from circulation (excluded from future `pull` results), the contributor's earned credit for it is clawed back, and a strike is recorded against them; at **5** strikes the contributor is auto-banned.
 
@@ -258,7 +262,7 @@ Community quality control. Report a job you've pulled as fake/dead/spam. Once **
   "contributor_banned": true
 }
 ```
-`contributor_banned` is only ever `true` alongside `job_flagged: true`, and only if this flag was also the contributor's 5th strike. If the job's contributor has since deleted their account (`DELETE /api/me`), the job can still be flagged normally, but no strike/ban happens — there's no account left to credit it against.
+`contributor_banned` is only ever `true` alongside `job_flagged: true`, and only if this flag was also the contributor's 5th strike. If the job's contributor has since deleted their account (`DELETE /v1/me`), the job can still be flagged normally, but no strike/ban happens — there's no account left to credit it against.
 
 **400**: `{ "error": "Missing or invalid job_id" }` or `{ "error": "Invalid reason" }` (non-string `reason`).
 
@@ -268,7 +272,7 @@ Community quality control. Report a job you've pulled as fake/dead/spam. Once **
 
 ---
 
-## `GET /api/me` 🔒
+## `GET /v1/me` 🔒
 
 Current economy balance and stats snapshot.
 
@@ -289,7 +293,7 @@ Current economy balance and stats snapshot.
 
 ---
 
-## `GET /api/me/export` 🔒
+## `GET /v1/me/export` 🔒
 
 Self-service data export — everything **this account's own data** touches. Does not include community data other users generated (e.g. reports filed *against* this account's jobs by other people).
 
@@ -324,7 +328,7 @@ All three arrays can be empty; none are paginated (they reflect one account's ow
 
 ---
 
-## `DELETE /api/me` 🔒
+## `DELETE /v1/me` 🔒
 
 Self-service, irreversible account deletion. Erases this account's row (email, IP, credit/stat history) and its own activity records (`pulled_jobs`, `job_reports` — cascade-deleted). **Jobs this account contributed are kept**, not deleted: `scraped_by_user_id` is set to `null` rather than the job being removed, since jobs are a shared resource other users may already be relying on. This also immediately invalidates every JWT for the account (there's simply no user row left for the next request to find).
 
@@ -343,7 +347,7 @@ Required — a bare `DELETE` with no body (or `confirm` not exactly `true`) is r
 
 ---
 
-## `GET /api/admin/users` 🔒
+## `GET /v1/admin/users` 🔒
 
 Look up account(s) by email. Since email is not unique, this can return more than one account for the same address (one per SSO provider).
 
@@ -372,7 +376,7 @@ Query parameter `email` (required).
 
 ---
 
-## `GET /api/admin/users/:id` 🔒
+## `GET /v1/admin/users/:id` 🔒
 
 Same fields as above, for one account by id.
 
@@ -384,7 +388,7 @@ Same fields as above, for one account by id.
 
 ---
 
-## `POST /api/admin/users/:id/credits` 🔒
+## `POST /v1/admin/users/:id/credits` 🔒
 
 Sets a user's credit balance to an **absolute value** (not a delta — you decide the resulting total, matching the `DATABASE_QUERIES.md` "grant N credits" pattern).
 
@@ -405,7 +409,7 @@ Sets a user's credit balance to an **absolute value** (not a delta — you decid
 
 ---
 
-## `POST /api/admin/users/:id/ban` 🔒
+## `POST /v1/admin/users/:id/ban` 🔒
 
 Send with **no body/Content-Type**.
 
@@ -417,13 +421,13 @@ Send with **no body/Content-Type**.
 
 ---
 
-## `POST /api/admin/users/:id/unban` 🔒
+## `POST /v1/admin/users/:id/unban` 🔒
 
 Same shape as `/ban` above.
 
 ---
 
-## `GET /api/admin/jobs/flagged` 🔒
+## `GET /v1/admin/jobs/flagged` 🔒
 
 Lists jobs currently withdrawn from circulation (3+ community reports).
 
@@ -450,7 +454,7 @@ Query parameter `limit` (optional, default 50, clamped to 1–200).
 
 ---
 
-## `POST /api/admin/jobs/:id/unflag` 🔒
+## `POST /v1/admin/jobs/:id/unflag` 🔒
 
 Restores a job to circulation — e.g. after review finds a report was a false positive. Send with **no body/Content-Type**.
 
@@ -462,7 +466,7 @@ Restores a job to circulation — e.g. after review finds a report was a false p
 
 ---
 
-## `GET /api/admin/jobs/:id/reports` 🔒
+## `GET /v1/admin/jobs/:id/reports` 🔒
 
 Who reported a job, and why. Works for **any** job, not just already-flagged ones — useful for reviewing a borderline case before it crosses the auto-flag threshold.
 
@@ -483,9 +487,9 @@ Who reported a job, and why. Works for **any** job, not just already-flagged one
 
 ---
 
-## `GET /api/admin/audit-log` 🔒
+## `GET /v1/admin/audit-log` 🔒
 
-Every write made through `/api/admin/*` — `set_credits`, `ban`, `unban`, `unflag_job` — newest first.
+Every write made through `/v1/admin/*` — `set_credits`, `ban`, `unban`, `unflag_job` — newest first.
 
 ### Request
 
@@ -514,7 +518,7 @@ Query parameter `limit` (optional, default 50, clamped to 1–200).
 
 ---
 
-## `GET /api/admin/stats` 🔒
+## `GET /v1/admin/stats` 🔒
 
 Aggregate system metrics — the API equivalent of `DATABASE_QUERIES.md`'s "Total System Metrics" and "View Top Contributors" queries.
 
@@ -527,13 +531,33 @@ Aggregate system metrics — the API equivalent of `DATABASE_QUERIES.md`'s "Tota
   "total_banned_users": 3,
   "total_jobs": 8901,
   "total_flagged_jobs": 12,
+  "total_stale_jobs": 340,
   "total_reports": 40,
   "top_contributors": [
     { "email": "someone@example.com", "total_pushed": 512, "current_credits": 87, "is_banned": false }
   ]
 }
 ```
-`top_contributors` is the top 10 accounts by `total_pushed`, descending.
+`top_contributors` is the top 10 accounts by `total_pushed`, descending. `total_stale_jobs` counts non-flagged jobs older than the 60-day pull cutoff (see `GET /v1/jobs/pull`) — these still exist and are still counted in `total_jobs`, just not served by default.
+
+---
+
+## `GET /`
+
+Unauthenticated. Not part of the versioned API surface — just basic metadata and links for anyone who opens the domain directly.
+
+### Response
+
+**200**:
+```json
+{
+  "name": "CareerAgent API",
+  "version": "abc1234",
+  "docs": "https://github.com/koteshrv/career-agent-api/blob/main/API_REFERENCE.md",
+  "repo": "https://github.com/koteshrv/career-agent-api",
+  "health": "/health"
+}
+```
 
 ---
 
@@ -558,7 +582,7 @@ Every endpoint marked 🔒 above can additionally return:
 | 401 | `{ "error": "Unauthorized" }` | No `Authorization` header, or not `Bearer <token>`. |
 | 401 | `{ "error": "Invalid token" }` | Signature invalid/forged, expired, or missing the `id` claim. |
 | 401 | `{ "error": "User not found" }` | Token is validly signed but its subject no longer has a user row (e.g. the account was deleted). |
-| 401 | `{ "error": "Token revoked" }` | Token was issued before the account's most recent `POST /api/auth/logout-all`. |
+| 401 | `{ "error": "Token revoked" }` | Token was issued before the account's most recent `POST /v1/auth/logout-all`. |
 | 403 | `{ "error": "User is banned" }` | Account is banned — this check happens even though the JWT itself is still validly signed and unexpired, since ban state is re-checked from the database on every request. |
 | 429 | `{ "error": "Too Many Requests" }` | See Rate limiting in Conventions. |
 

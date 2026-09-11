@@ -6,6 +6,24 @@
   },
   "item": [
     {
+      "name": "0. API Info",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            ""
+          ]
+        },
+        "description": "Unauthenticated. Basic metadata and links — not part of the versioned API surface."
+      },
+      "response": []
+    },
+    {
       "name": "1. SSO Login",
       "event": [
         {
@@ -36,12 +54,12 @@
           "raw": "{\n    \"idp_token\": \"PASTE_REAL_TOKEN_HERE\",\n    \"sso_provider\": \"github\"\n}"
         },
         "url": {
-          "raw": "{{base_url}}/api/auth/login",
+          "raw": "{{base_url}}/v1/auth/login",
           "host": [
             "{{base_url}}"
           ],
           "path": [
-            "api",
+            "v1",
             "auth",
             "login"
           ]
@@ -76,12 +94,12 @@
           "raw": "{\n    \"jobs\": [\n        {\n            \"company\": \"TechCorp\",\n            \"title\": \"Software Engineer\",\n            \"location\": \"Remote\",\n            \"url\": \"https://techcorp.com/jobs/1\"\n        },\n        {\n            \"company\": \"InnoSys\",\n            \"title\": \"Frontend Developer\",\n            \"location\": \"New York, NY\",\n            \"url\": \"https://innosys.com/jobs/2\"\n        }\n    ]\n}"
         },
         "url": {
-          "raw": "{{base_url}}/api/jobs/push",
+          "raw": "{{base_url}}/v1/jobs/push",
           "host": [
             "{{base_url}}"
           ],
           "path": [
-            "api",
+            "v1",
             "jobs",
             "push"
           ]
@@ -106,12 +124,12 @@
         "method": "GET",
         "header": [],
         "url": {
-          "raw": "{{base_url}}/api/jobs/pull?limit=5",
+          "raw": "{{base_url}}/v1/jobs/pull?limit=5",
           "host": [
             "{{base_url}}"
           ],
           "path": [
-            "api",
+            "v1",
             "jobs",
             "pull"
           ],
@@ -122,7 +140,7 @@
             }
           ]
         },
-        "description": "Pulls the latest jobs and deducts credits. Requires JWT token."
+        "description": "Pulls the latest jobs and deducts credits. Requires JWT token. Jobs older than 60 days are excluded by default — add &include_stale=true to the URL to include them."
       },
       "response": []
     },
@@ -152,12 +170,12 @@
           "raw": "{\n    \"job_id\": \"PASTE_JOB_ID_FROM_PULL\",\n    \"reason\": \"dead_link\"\n}"
         },
         "url": {
-          "raw": "{{base_url}}/api/jobs/report",
+          "raw": "{{base_url}}/v1/jobs/report",
           "host": [
             "{{base_url}}"
           ],
           "path": [
-            "api",
+            "v1",
             "jobs",
             "report"
           ]
@@ -182,12 +200,12 @@
         "method": "GET",
         "header": [],
         "url": {
-          "raw": "{{base_url}}/api/me",
+          "raw": "{{base_url}}/v1/me",
           "host": [
             "{{base_url}}"
           ],
           "path": [
-            "api",
+            "v1",
             "me"
           ]
         },
@@ -229,12 +247,12 @@
         "method": "POST",
         "header": [],
         "url": {
-          "raw": "{{base_url}}/api/auth/logout-all",
+          "raw": "{{base_url}}/v1/auth/logout-all",
           "host": [
             "{{base_url}}"
           ],
           "path": [
-            "api",
+            "v1",
             "auth",
             "logout-all"
           ]
@@ -259,12 +277,12 @@
         "method": "GET",
         "header": [],
         "url": {
-          "raw": "{{base_url}}/api/me/export",
+          "raw": "{{base_url}}/v1/me/export",
           "host": [
             "{{base_url}}"
           ],
           "path": [
-            "api",
+            "v1",
             "me",
             "export"
           ]
@@ -299,12 +317,12 @@
           "raw": "{\n    \"confirm\": true\n}"
         },
         "url": {
-          "raw": "{{base_url}}/api/me",
+          "raw": "{{base_url}}/v1/me",
           "host": [
             "{{base_url}}"
           ],
           "path": [
-            "api",
+            "v1",
             "me"
           ]
         },
@@ -332,12 +350,12 @@
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{base_url}}/api/admin/users?email=user@example.com",
+              "raw": "{{base_url}}/v1/admin/users?email=user@example.com",
               "host": [
                 "{{base_url}}"
               ],
               "path": [
-                "api",
+                "v1",
                 "admin",
                 "users"
               ],
@@ -368,12 +386,12 @@
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{base_url}}/api/admin/users/{{target_user_id}}",
+              "raw": "{{base_url}}/v1/admin/users/{{target_user_id}}",
               "host": [
                 "{{base_url}}"
               ],
               "path": [
-                "api",
+                "v1",
                 "admin",
                 "users",
                 "{{target_user_id}}"
@@ -408,12 +426,12 @@
               "raw": "{\n    \"credits\": 50000\n}"
             },
             "url": {
-              "raw": "{{base_url}}/api/admin/users/{{target_user_id}}/credits",
+              "raw": "{{base_url}}/v1/admin/users/{{target_user_id}}/credits",
               "host": [
                 "{{base_url}}"
               ],
               "path": [
-                "api",
+                "v1",
                 "admin",
                 "users",
                 "{{target_user_id}}",
@@ -440,12 +458,12 @@
             "method": "POST",
             "header": [],
             "url": {
-              "raw": "{{base_url}}/api/admin/users/{{target_user_id}}/ban",
+              "raw": "{{base_url}}/v1/admin/users/{{target_user_id}}/ban",
               "host": [
                 "{{base_url}}"
               ],
               "path": [
-                "api",
+                "v1",
                 "admin",
                 "users",
                 "{{target_user_id}}",
@@ -471,12 +489,12 @@
             "method": "POST",
             "header": [],
             "url": {
-              "raw": "{{base_url}}/api/admin/users/{{target_user_id}}/unban",
+              "raw": "{{base_url}}/v1/admin/users/{{target_user_id}}/unban",
               "host": [
                 "{{base_url}}"
               ],
               "path": [
-                "api",
+                "v1",
                 "admin",
                 "users",
                 "{{target_user_id}}",
@@ -502,12 +520,12 @@
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{base_url}}/api/admin/jobs/flagged?limit=50",
+              "raw": "{{base_url}}/v1/admin/jobs/flagged?limit=50",
               "host": [
                 "{{base_url}}"
               ],
               "path": [
-                "api",
+                "v1",
                 "admin",
                 "jobs",
                 "flagged"
@@ -538,12 +556,12 @@
             "method": "POST",
             "header": [],
             "url": {
-              "raw": "{{base_url}}/api/admin/jobs/{{target_job_id}}/unflag",
+              "raw": "{{base_url}}/v1/admin/jobs/{{target_job_id}}/unflag",
               "host": [
                 "{{base_url}}"
               ],
               "path": [
-                "api",
+                "v1",
                 "admin",
                 "jobs",
                 "{{target_job_id}}",
@@ -570,12 +588,12 @@
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{base_url}}/api/admin/jobs/{{target_job_id}}/reports",
+              "raw": "{{base_url}}/v1/admin/jobs/{{target_job_id}}/reports",
               "host": [
                 "{{base_url}}"
               ],
               "path": [
-                "api",
+                "v1",
                 "admin",
                 "jobs",
                 "{{target_job_id}}",
@@ -602,12 +620,12 @@
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{base_url}}/api/admin/audit-log?limit=50",
+              "raw": "{{base_url}}/v1/admin/audit-log?limit=50",
               "host": [
                 "{{base_url}}"
               ],
               "path": [
-                "api",
+                "v1",
                 "admin",
                 "audit-log"
               ],
@@ -618,7 +636,7 @@
                 }
               ]
             },
-            "description": "Every write made through /api/admin/* — who did what, when."
+            "description": "Every write made through /v1/admin/* — who did what, when."
           },
           "response": []
         },
@@ -638,12 +656,12 @@
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{base_url}}/api/admin/stats",
+              "raw": "{{base_url}}/v1/admin/stats",
               "host": [
                 "{{base_url}}"
               ],
               "path": [
-                "api",
+                "v1",
                 "admin",
                 "stats"
               ]

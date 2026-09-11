@@ -60,7 +60,34 @@ security:
   - bearerAuth: []
 
 paths:
-  /api/auth/login:
+  /:
+    get:
+      summary: Root
+      description: Unauthenticated. Basic API metadata and links — not part of the versioned API surface.
+      security: []
+      responses:
+        '200':
+          description: API metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name:
+                    type: string
+                    example: CareerAgent API
+                  version:
+                    type: string
+                    description: The deployed image's git commit hash, or "unknown".
+                  docs:
+                    type: string
+                  repo:
+                    type: string
+                  health:
+                    type: string
+                    example: /health
+
+  /v1/auth/login:
     post:
       summary: SSO Login
       description: >
@@ -113,7 +140,7 @@ paths:
         '500':
           description: Server misconfiguration (GOOGLE_CLIENT_ID, or GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET, not set for the requested provider)
 
-  /api/auth/logout-all:
+  /v1/auth/logout-all:
     post:
       summary: Log Out Everywhere
       description: >
@@ -138,7 +165,7 @@ paths:
         '403':
           description: User is banned.
 
-  /api/jobs/push:
+  /v1/jobs/push:
     post:
       summary: Push Scraped Jobs
       description: >
@@ -201,10 +228,10 @@ paths:
         '429':
           description: Too Many Requests (rate limited)
 
-  /api/jobs/pull:
+  /v1/jobs/pull:
     get:
       summary: Pull Jobs
-      description: Consume jobs from the database. Deducts 1 API credit per job. Falls back to a strict daily quota (50 jobs/day) if credits are 0. Each user is only ever served a given job once — already-pulled jobs are excluded from future pulls.
+      description: Consume jobs from the database. Deducts 1 API credit per job. Falls back to a strict daily quota (50 jobs/day) if credits are 0. Each user is only ever served a given job once — already-pulled jobs are excluded from future pulls. Jobs older than 60 days are excluded by default (soft staleness — see include_stale).
       parameters:
         - in: query
           name: limit
@@ -214,6 +241,12 @@ paths:
             minimum: 1
             maximum: 100
           description: Maximum number of jobs to return.
+        - in: query
+          name: include_stale
+          schema:
+            type: string
+            enum: ["true"]
+          description: Include jobs older than 60 days, which are excluded by default.
       responses:
         '200':
           description: Jobs retrieved
@@ -252,7 +285,7 @@ paths:
         '409':
           description: Conflict (lost a race with a concurrent pull request from the same user); safe to retry
 
-  /api/me:
+  /v1/me:
     get:
       summary: Get Account Info
       description: Returns the authenticated user's current Give-to-Get economy balance and stats.
@@ -287,7 +320,7 @@ paths:
         '401':
           description: Unauthorized (Missing or Invalid JWT)
 
-  /api/me/export:
+  /v1/me/export:
     get:
       summary: Export Account Data
       description: >
@@ -300,7 +333,7 @@ paths:
         '401':
           description: Unauthorized (Missing or Invalid JWT)
 
-  /api/me:
+  /v1/me:
     delete:
       summary: Delete Account
       description: >
@@ -328,7 +361,7 @@ paths:
         '401':
           description: Unauthorized (Missing or Invalid JWT)
 
-  /api/jobs/report:
+  /v1/jobs/report:
     post:
       summary: Report a Job
       description: >
@@ -383,7 +416,7 @@ paths:
         '404':
           description: Job not found
 
-  /api/admin/users:
+  /v1/admin/users:
     get:
       summary: "[Admin] Look Up Users By Email"
       description: >
@@ -405,7 +438,7 @@ paths:
         '404':
           description: Not an admin account
 
-  /api/admin/users/{id}:
+  /v1/admin/users/{id}:
     get:
       summary: "[Admin] Get User"
       parameters:
@@ -423,7 +456,7 @@ paths:
         '404':
           description: Not an admin account, or user not found
 
-  /api/admin/users/{id}/credits:
+  /v1/admin/users/{id}/credits:
     post:
       summary: "[Admin] Set Credit Balance"
       parameters:
@@ -455,7 +488,7 @@ paths:
         '404':
           description: Not an admin account, or user not found
 
-  /api/admin/users/{id}/ban:
+  /v1/admin/users/{id}/ban:
     post:
       summary: "[Admin] Ban User"
       parameters:
@@ -473,7 +506,7 @@ paths:
         '404':
           description: Not an admin account, or user not found
 
-  /api/admin/users/{id}/unban:
+  /v1/admin/users/{id}/unban:
     post:
       summary: "[Admin] Unban User"
       parameters:
@@ -491,7 +524,7 @@ paths:
         '404':
           description: Not an admin account, or user not found
 
-  /api/admin/jobs/flagged:
+  /v1/admin/jobs/flagged:
     get:
       summary: "[Admin] List Flagged Jobs"
       parameters:
@@ -510,7 +543,7 @@ paths:
         '404':
           description: Not an admin account
 
-  /api/admin/jobs/{id}/unflag:
+  /v1/admin/jobs/{id}/unflag:
     post:
       summary: "[Admin] Un-flag a Job"
       description: Restores a job to circulation, e.g. after review finds a report was a false positive.
@@ -529,7 +562,7 @@ paths:
         '404':
           description: Not an admin account, or job not found
 
-  /api/admin/jobs/{id}/reports:
+  /v1/admin/jobs/{id}/reports:
     get:
       summary: "[Admin] Who Reported a Job, and Why"
       description: >
@@ -550,10 +583,10 @@ paths:
         '404':
           description: Not an admin account, or job not found
 
-  /api/admin/audit-log:
+  /v1/admin/audit-log:
     get:
       summary: "[Admin] Audit Log"
-      description: Every write made through /api/admin/* — who did what, when.
+      description: Every write made through /v1/admin/* — who did what, when.
       parameters:
         - in: query
           name: limit
@@ -570,10 +603,10 @@ paths:
         '404':
           description: Not an admin account
 
-  /api/admin/stats:
+  /v1/admin/stats:
     get:
       summary: "[Admin] Aggregate System Metrics"
-      description: Total users/jobs/reports/flags, plus the top 10 contributors by jobs pushed.
+      description: Total users/jobs/reports/flags/stale jobs, plus the top 10 contributors by jobs pushed.
       responses:
         '200':
           description: Aggregate stats

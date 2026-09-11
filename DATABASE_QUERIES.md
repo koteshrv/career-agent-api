@@ -2,7 +2,7 @@
 
 This document contains useful SQL queries for administering, testing, and debugging the `career-agent-api` PostgreSQL database.
 
-**Most moderation actions below now have an authenticated `/api/admin/*` endpoint** (see `openapi.yaml`) — prefer those over raw SQL where one exists, since they're audited, validated, and don't need direct database access. The queries stay here for the one thing the API can't do (bootstrapping the very first admin account) and as an emergency fallback if the API itself is unreachable.
+**Most moderation actions below now have an authenticated `/v1/admin/*` endpoint** (see `openapi.yaml`) — prefer those over raw SQL where one exists, since they're audited, validated, and don't need direct database access. The queries stay here for the one thing the API can't do (bootstrapping the very first admin account) and as an emergency fallback if the API itself is unreachable.
 
 ## 👥 User Management & Moderation
 
@@ -11,10 +11,10 @@ There's no self-service way to become an admin — this is the one operation wit
 ```sql
 UPDATE users SET is_admin = true WHERE email = 'you@example.com';
 ```
-After this, use `POST /api/admin/users/:id/credits`, `/ban`, `/unban`, and `GET /api/admin/jobs/flagged` + `POST /api/admin/jobs/:id/unflag` instead of the raw SQL below.
+After this, use `POST /v1/admin/users/:id/credits`, `/ban`, `/unban`, and `GET /v1/admin/jobs/flagged` + `POST /v1/admin/jobs/:id/unflag` instead of the raw SQL below.
 
 ### Grant a user 50,000 API Credits (Admin Bypass)
-Prefer `POST /api/admin/users/:id/credits` with `{"credits": 50000}`.
+Prefer `POST /v1/admin/users/:id/credits` with `{"credits": 50000}`.
 ```sql
 UPDATE users 
 SET current_credits = 50000 
@@ -39,7 +39,7 @@ LIMIT 10;
 ```
 
 ### Manually Ban or Unban a User
-Prefer `POST /api/admin/users/:id/ban` / `/unban`.
+Prefer `POST /v1/admin/users/:id/ban` / `/unban`.
 ```sql
 -- Ban
 UPDATE users SET is_banned = true WHERE email = 'spammer@example.com';
@@ -62,7 +62,7 @@ ORDER BY created_at DESC;
 ```
 
 ### Un-flag a False Positive Job
-If a job was maliciously reported, you can restore it to the global pool. Prefer `POST /api/admin/jobs/:id/unflag` (and `GET /api/admin/jobs/flagged` to find it).
+If a job was maliciously reported, you can restore it to the global pool. Prefer `POST /v1/admin/jobs/:id/unflag` (and `GET /v1/admin/jobs/flagged` to find it).
 ```sql
 UPDATE jobs SET is_flagged = false WHERE id = 'job_id_here';
 ```
@@ -90,7 +90,7 @@ SELECT
 ## 🚨 System Integrity & Debugging
 
 ### Find Jobs Whose Contributor Deleted Their Account
-`scraped_by_user_id` is nullable and set null (not cascade-deleted) when a contributor uses self-service account deletion (`DELETE /api/me`) — the job itself is kept, since it's a shared resource other users may already rely on. This is expected/normal, not data corruption; use it to see how many jobs currently have no attributed contributor.
+`scraped_by_user_id` is nullable and set null (not cascade-deleted) when a contributor uses self-service account deletion (`DELETE /v1/me`) — the job itself is kept, since it's a shared resource other users may already rely on. This is expected/normal, not data corruption; use it to see how many jobs currently have no attributed contributor.
 ```sql
 SELECT * FROM jobs 
 WHERE scraped_by_user_id IS NULL;

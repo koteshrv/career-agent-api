@@ -16,7 +16,7 @@ export const TEST_USER_ID = '11111111-1111-1111-1111-111111111111';
  * Inserts a user directly, bypassing the SSO login flow (which would require
  * calling out to Google/GitHub). provider_user_id is left unset for these —
  * only the identity/login tests need it, and they create users through the
- * real /api/auth/login flow with mocked IdP responses instead (see stubFetch).
+ * real /v1/auth/login flow with mocked IdP responses instead (see stubFetch).
  */
 export async function createUser(
   id: string,
@@ -40,7 +40,7 @@ export async function createUser(
 }
 
 /**
- * Mints a JWT the same way /api/auth/login does, signed with the RS256
+ * Mints a JWT the same way /v1/auth/login does, signed with the RS256
  * test keypair test/setup.ts generates into process.env.
  */
 export function tokenFor(id: string | null, overrides: Record<string, unknown> = {}): string {
@@ -69,7 +69,7 @@ export function job(n: number, overrides: Record<string, unknown> = {}) {
 
 /**
  * Stubs global fetch for one test — used to fake Google/GitHub's HTTP APIs
- * during /api/auth/login tests without calling out to the real internet.
+ * during /v1/auth/login tests without calling out to the real internet.
  * Callers get the mock's spy back so they can assert on calls if needed;
  * test/setup.ts restores all mocks after every test automatically.
  */

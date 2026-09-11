@@ -18,23 +18,24 @@ Accounts are identified by `(sso_provider, provider_user_id)` — the IdP's own 
 
 | Endpoint | Auth | Purpose |
 |---|---|---|
-| `POST /api/auth/login` | — | Exchange a Google/GitHub token for an API JWT |
-| `POST /api/auth/logout-all` | 🔒 | Invalidate every issued token for this account |
-| `POST /api/jobs/push` | 🔒 | Upload scraped jobs, earn credits |
-| `GET /api/jobs/pull` | 🔒 | Consume jobs, spend credits/quota |
-| `POST /api/jobs/report` | 🔒 | Report a pulled job as fake/dead/spam |
-| `GET /api/me` | 🔒 | Credit balance and stats |
-| `GET /api/me/export` | 🔒 | Export this account's own data |
-| `DELETE /api/me` | 🔒 | Delete this account |
-| `GET /api/admin/users` | 🔒👑 | Look up accounts by email |
-| `GET /api/admin/users/:id` | 🔒👑 | Get one account |
-| `POST /api/admin/users/:id/credits` | 🔒👑 | Set a credit balance |
-| `POST /api/admin/users/:id/ban` \| `/unban` | 🔒👑 | Ban/unban an account |
-| `GET /api/admin/jobs/flagged` | 🔒👑 | List withdrawn jobs |
-| `POST /api/admin/jobs/:id/unflag` | 🔒👑 | Restore a job to circulation |
-| `GET /api/admin/jobs/:id/reports` | 🔒👑 | Who reported a job, and why |
-| `GET /api/admin/audit-log` | 🔒👑 | Every admin write, who did it |
-| `GET /api/admin/stats` | 🔒👑 | Aggregate system metrics |
+| `POST /v1/auth/login` | — | Exchange a Google/GitHub token for an API JWT |
+| `POST /v1/auth/logout-all` | 🔒 | Invalidate every issued token for this account |
+| `POST /v1/jobs/push` | 🔒 | Upload scraped jobs, earn credits |
+| `GET /v1/jobs/pull` | 🔒 | Consume jobs, spend credits/quota |
+| `POST /v1/jobs/report` | 🔒 | Report a pulled job as fake/dead/spam |
+| `GET /v1/me` | 🔒 | Credit balance and stats |
+| `GET /v1/me/export` | 🔒 | Export this account's own data |
+| `DELETE /v1/me` | 🔒 | Delete this account |
+| `GET /v1/admin/users` | 🔒👑 | Look up accounts by email |
+| `GET /v1/admin/users/:id` | 🔒👑 | Get one account |
+| `POST /v1/admin/users/:id/credits` | 🔒👑 | Set a credit balance |
+| `POST /v1/admin/users/:id/ban` \| `/unban` | 🔒👑 | Ban/unban an account |
+| `GET /v1/admin/jobs/flagged` | 🔒👑 | List withdrawn jobs |
+| `POST /v1/admin/jobs/:id/unflag` | 🔒👑 | Restore a job to circulation |
+| `GET /v1/admin/jobs/:id/reports` | 🔒👑 | Who reported a job, and why |
+| `GET /v1/admin/audit-log` | 🔒👑 | Every admin write, who did it |
+| `GET /v1/admin/stats` | 🔒👑 | Aggregate system metrics |
+| `GET /` | — | API metadata and links |
 | `GET /health` | — | Liveness probe |
 
 🔒 = requires a JWT · 👑 = requires `is_admin` on that account (see [Bootstrapping an Admin](#bootstrapping-an-admin) below)
@@ -86,7 +87,7 @@ There's no self-service way to become an admin. After applying `migrations/0003_
 ```sql
 UPDATE users SET is_admin = true WHERE email = 'you@example.com';
 ```
-From there, `/api/admin/*` (see `openapi.yaml`) covers granting credits, banning/unbanning, and un-flagging jobs — see [DATABASE_QUERIES.md](DATABASE_QUERIES.md) for the raw-SQL fallback.
+From there, `/v1/admin/*` (see `openapi.yaml`) covers granting credits, banning/unbanning, and un-flagging jobs — see [DATABASE_QUERIES.md](DATABASE_QUERIES.md) for the raw-SQL fallback.
 
 ---
 
@@ -122,7 +123,7 @@ npm test
 ## 🔒 Security & Architecture Notes
 * **Network Isolation**: The `docker-compose.yml` is configured with strict network separation. The API talks to Postgres and Redis over an isolated internal `db-network`.
 * **Exposing the API**: `api` has no published host port — whatever reverse proxy you add (see [Expose the API](#4-expose-the-api) above) is meant to be the only path in. This is load-bearing, not just for TLS: the app trusts the header named by `TRUSTED_IP_HEADER` for rate limiting, which is only safe because nothing else can reach the container directly. Don't add a `ports:` mapping back onto `api` without also reconsidering `TRUSTED_IP_HEADER` — anything with a second, unproxied path to the container can set that header to whatever it wants.
-* **Revoking a token**: `POST /api/auth/logout-all` (authenticated) invalidates every JWT previously issued to that account. There's no single-session revocation — JWTs aren't tracked individually, so it's all-or-nothing per account.
-* **Your data**: `GET /api/me/export` returns everything tied to your account (profile, jobs contributed/pulled, reports filed). `DELETE /api/me` (with `{"confirm": true}`) erases your account and its activity records — jobs you contributed stay in the shared pool with their attribution to you removed, rather than being deleted out from under everyone who's already pulled them.
-* **Admin API**: `/api/admin/*` requires `is_admin` on your account (bootstrapped by hand — see above). A non-admin gets `404` from these routes, not `403`, so they can't be distinguished from a typo'd path.
-* **Login rate limiting**: `/api/auth/login` has its own tighter budget (20 requests/60s per IP) on top of the general 100/60s applied everywhere else, since it's the highest-value target for credential stuffing.
+* **Revoking a token**: `POST /v1/auth/logout-all` (authenticated) invalidates every JWT previously issued to that account. There's no single-session revocation — JWTs aren't tracked individually, so it's all-or-nothing per account.
+* **Your data**: `GET /v1/me/export` returns everything tied to your account (profile, jobs contributed/pulled, reports filed). `DELETE /v1/me` (with `{"confirm": true}`) erases your account and its activity records — jobs you contributed stay in the shared pool with their attribution to you removed, rather than being deleted out from under everyone who's already pulled them.
+* **Admin API**: `/v1/admin/*` requires `is_admin` on your account (bootstrapped by hand — see above). A non-admin gets `404` from these routes, not `403`, so they can't be distinguished from a typo'd path.
+* **Login rate limiting**: `/v1/auth/login` has its own tighter budget (20 requests/60s per IP) on top of the general 100/60s applied everywhere else, since it's the highest-value target for credential stuffing.

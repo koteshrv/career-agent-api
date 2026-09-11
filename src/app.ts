@@ -678,9 +678,13 @@ app.get('/api/jobs/pull', { preHandler: authMiddleware }, async (request, reply)
       }
       // else: credits changed concurrently between our read and write — retry
     } else {
-      // Freerider State: blocked once the daily free quota is exhausted
+      // Freerider State: blocked once the daily free quota is exhausted.
+      // status(403) explicitly: every other error path in this file does the
+      // same, and a bare reply.send() here would default to 200 — silently
+      // telling any client that checks response.ok/2xx (which is most HTTP
+      // client code, including fetch's res.ok) that this succeeded.
       if (pulledToday >= DAILY_QUOTA) {
-        return reply.send({ error: 'Daily quota exceeded. Push more jobs to earn credits.' });
+        return reply.status(403).send({ error: 'Daily quota exceeded. Push more jobs to earn credits.' });
       }
       const want = Math.min(limit, DAILY_QUOTA - pulledToday);
       const warningMessage =

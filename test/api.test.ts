@@ -319,6 +319,7 @@ describe('pull economy', () => {
       .run();
 
     const res = await pull(1);
+    expect(res.status).toBe(403);
     const body = (await res.json()) as any;
     expect(body.error).toMatch(/quota/i);
   });

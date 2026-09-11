@@ -8,6 +8,32 @@ It features an asymmetric (RS256) JWT-based SSO system (GitHub & Google) and a "
 
 Accounts are identified by `(sso_provider, provider_user_id)` — the IdP's own stable subject id — not by email, since the same email can be independently verified by two different providers (or reassigned at the IdP over time). Logging in from a new provider always creates a separate account, even if the email matches one you already have.
 
+## 📖 API Documentation
+
+- **[API_REFERENCE.md](API_REFERENCE.md)** — full request/response reference for every endpoint: exact field types, every status code and error body, and the edge cases (idempotency, what happens when a job's contributor has deleted their account, etc.).
+- **[openapi.yaml](openapi.yaml)** — the same surface as a machine-readable OpenAPI 3.0 spec.
+- **[postman/postman_collection.json](postman/postman_collection.json)** — ready-to-run requests for every endpoint, including an Admin folder.
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `POST /api/auth/login` | — | Exchange a Google/GitHub token for an API JWT |
+| `POST /api/auth/logout-all` | 🔒 | Invalidate every issued token for this account |
+| `POST /api/jobs/push` | 🔒 | Upload scraped jobs, earn credits |
+| `GET /api/jobs/pull` | 🔒 | Consume jobs, spend credits/quota |
+| `POST /api/jobs/report` | 🔒 | Report a pulled job as fake/dead/spam |
+| `GET /api/me` | 🔒 | Credit balance and stats |
+| `GET /api/me/export` | 🔒 | Export this account's own data |
+| `DELETE /api/me` | 🔒 | Delete this account |
+| `GET /api/admin/users` | 🔒👑 | Look up accounts by email |
+| `GET /api/admin/users/:id` | 🔒👑 | Get one account |
+| `POST /api/admin/users/:id/credits` | 🔒👑 | Set a credit balance |
+| `POST /api/admin/users/:id/ban` \| `/unban` | 🔒👑 | Ban/unban an account |
+| `GET /api/admin/jobs/flagged` | 🔒👑 | List withdrawn jobs |
+| `POST /api/admin/jobs/:id/unflag` | 🔒👑 | Restore a job to circulation |
+| `GET /health` | — | Liveness probe |
+
+🔒 = requires a JWT · 👑 = requires `is_admin` on that account (see [Bootstrapping an Admin](#bootstrapping-an-admin) below)
+
 ---
 
 ## 🚀 Production Deployment (Docker)

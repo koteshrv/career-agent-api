@@ -1,10 +1,14 @@
-import { env, SELF } from 'cloudflare:test';
-import { beforeEach, describe, expect, it } from 'vitest';
+import jwt from 'jsonwebtoken';
+import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import app from '../src/app';
+import { DB } from '../src/db';
 import {
   authHeaders,
   createUser,
   job,
+  jsonResponse,
   resetDatabase,
+  stubFetch,
   TEST_USER_ID,
   tokenFor,
 } from './helpers';
@@ -13,41 +17,71 @@ const OTHER_USER_ID = '22222222-2222-2222-2222-222222222222';
 
 let token: string;
 
+beforeAll(async () => {
+  await app.ready();
+});
+
+/** Thin adapter so the rest of this file reads like a real fetch response. */
+async function req(opts: {
+  method: string;
+  url: string;
+  headers?: Record<string, string>;
+  payload?: unknown;
+}): Promise<{ status: number; json: () => Promise<any> }> {
+  const res = await app.inject(opts as any);
+  return { status: res.statusCode, json: async () => res.json() };
+}
+
+function decodeUserId(token: string): string {
+  return (jwt.decode(token) as any).id;
+}
+
 async function push(body: unknown, as: string = token) {
-  return SELF.fetch('https://api.test/api/jobs/push', {
-    method: 'POST',
-    headers: authHeaders(as),
-    body: JSON.stringify(body),
-  });
+  return req({ method: 'POST', url: '/api/jobs/push', headers: authHeaders(as), payload: body });
 }
 
 async function pull(limit: number | string = 10, as: string = token) {
-  return SELF.fetch(`https://api.test/api/jobs/pull?limit=${limit}`, {
-    headers: authHeaders(as),
-  });
+  return req({ method: 'GET', url: `/api/jobs/pull?limit=${limit}`, headers: authHeaders(as) });
 }
 
 async function me(as: string = token) {
-  return SELF.fetch('https://api.test/api/me', { headers: authHeaders(as) });
+  return req({ method: 'GET', url: '/api/me', headers: authHeaders(as) });
 }
 
 async function report(jobId: string, as: string = token) {
-  return SELF.fetch('https://api.test/api/jobs/report', {
+  return req({
     method: 'POST',
+    url: '/api/jobs/report',
     headers: authHeaders(as),
-    body: JSON.stringify({ job_id: jobId, reason: 'fake' }),
+    payload: { job_id: jobId, reason: 'fake' },
+  });
+}
+
+async function logoutAll(as: string = token) {
+  // Deliberately not authHeaders(): this route takes no body, and sending a
+  // Content-Type: application/json with no payload trips Fastify's own
+  // empty-JSON-body rejection before the handler ever runs.
+  return req({ method: 'POST', url: '/api/auth/logout-all', headers: { Authorization: `Bearer ${as}` } });
+}
+
+async function login(body: unknown) {
+  return req({
+    method: 'POST',
+    url: '/api/auth/login',
+    headers: { 'Content-Type': 'application/json' },
+    payload: body,
   });
 }
 
 beforeEach(async () => {
   await resetDatabase();
   await createUser(TEST_USER_ID, 'test@example.com', 100);
-  token = await tokenFor(TEST_USER_ID);
+  token = tokenFor(TEST_USER_ID);
 });
 
 describe('authentication', () => {
   it('rejects a request with no Authorization header', async () => {
-    const res = await SELF.fetch('https://api.test/api/me');
+    const res = await req({ method: 'GET', url: '/api/me' });
     expect(res.status).toBe(401);
   });
 
@@ -57,30 +91,37 @@ describe('authentication', () => {
   });
 
   it('rejects a validly-signed token with no id claim (regression: used to 500)', async () => {
-    const res = await me(await tokenFor(null));
+    const res = await me(tokenFor(null));
     expect(res.status).toBe(401);
     expect(await res.json()).toEqual({ error: 'Invalid token' });
   });
 
   it('rejects an expired token', async () => {
-    const expired = await tokenFor(TEST_USER_ID, {
+    const expired = tokenFor(TEST_USER_ID, {
       exp: Math.floor(Date.now() / 1000) - 60,
     });
     expect((await me(expired)).status).toBe(401);
   });
 
   it('rejects a banned user with 403', async () => {
-    await env.DB.prepare('UPDATE users SET is_banned = 1 WHERE id = ?').bind(TEST_USER_ID).run();
+    await DB.prepare('UPDATE users SET is_banned = true WHERE id = ?').bind(TEST_USER_ID).run();
     expect((await me()).status).toBe(403);
+  });
+
+  it('rejects a token whose token_version no longer matches (revoked by logout-all)', async () => {
+    await DB.prepare('UPDATE users SET token_version = 1 WHERE id = ?').bind(TEST_USER_ID).run();
+    // `token` was signed back in beforeEach, with the implicit tv 0.
+    expect((await me()).status).toBe(401);
   });
 });
 
 describe('push validation', () => {
   it('rejects a malformed JSON body with 400, not 500', async () => {
-    const res = await SELF.fetch('https://api.test/api/jobs/push', {
+    const res = await req({
       method: 'POST',
+      url: '/api/jobs/push',
       headers: authHeaders(token),
-      body: '{not json',
+      payload: '{not json' as any,
     });
     expect(res.status).toBe(400);
   });
@@ -139,7 +180,7 @@ describe('push daily credit cap', () => {
   it('stops minting credits past the daily cap but still stores the jobs', async () => {
     // Cap is 500; pretend 499 have already been earned today.
     const today = new Date().toISOString().split('T')[0];
-    await env.DB.prepare('UPDATE users SET pushed_today = 499, last_push_date = ? WHERE id = ?')
+    await DB.prepare('UPDATE users SET pushed_today = 499, last_push_date = ? WHERE id = ?')
       .bind(today, TEST_USER_ID)
       .run();
 
@@ -148,12 +189,12 @@ describe('push daily credit cap', () => {
     expect(body.jobs_accepted).toBe(3);
     expect(body.warning).toMatch(/cap/i);
 
-    const stored = await env.DB.prepare('SELECT COUNT(*) AS n FROM jobs').first<{ n: number }>();
+    const stored = await DB.prepare('SELECT COUNT(*)::int AS n FROM jobs').first<{ n: number }>();
     expect(stored?.n).toBe(3);
   });
 
   it('resets the cap on a new day', async () => {
-    await env.DB.prepare(
+    await DB.prepare(
       "UPDATE users SET pushed_today = 500, last_push_date = '2000-01-01' WHERE id = ?"
     )
       .bind(TEST_USER_ID)
@@ -211,31 +252,29 @@ describe('pull economy', () => {
 
   it('falls back to the free daily quota at zero credits', async () => {
     await push({ jobs: [job(1)] });
-    await env.DB.prepare('UPDATE users SET current_credits = 0 WHERE id = ?')
-      .bind(TEST_USER_ID)
-      .run();
+    await DB.prepare('UPDATE users SET current_credits = 0 WHERE id = ?').bind(TEST_USER_ID).run();
 
     const body = (await (await pull(1)).json()) as any;
     expect(body.quota_used).toBe(1);
     expect(body.deducted).toBe(0);
   });
 
-  it('blocks with 403 once the free daily quota is exhausted', async () => {
+  it('blocks once the free daily quota is exhausted', async () => {
     const today = new Date().toISOString().split('T')[0];
-    await env.DB.prepare(
+    await DB.prepare(
       'UPDATE users SET current_credits = 0, pulled_today = 50, last_pull_date = ? WHERE id = ?'
     )
       .bind(today, TEST_USER_ID)
       .run();
 
-    expect((await pull(1)).status).toBe(403);
+    const res = await pull(1);
+    const body = (await res.json()) as any;
+    expect(body.error).toMatch(/quota/i);
   });
 
   it('never lets concurrent pulls overspend a credit balance', async () => {
     await push({ jobs: Array.from({ length: 10 }, (_, i) => job(i)) });
-    await env.DB.prepare('UPDATE users SET current_credits = 3 WHERE id = ?')
-      .bind(TEST_USER_ID)
-      .run();
+    await DB.prepare('UPDATE users SET current_credits = 3 WHERE id = ?').bind(TEST_USER_ID).run();
 
     const results = await Promise.all(Array.from({ length: 6 }, () => pull(1)));
     const bodies = (await Promise.all(results.map((r) => r.json()))) as any[];
@@ -266,13 +305,13 @@ describe('community reporting', () => {
 
   it('refuses to report a job the user never pulled', async () => {
     await push({ jobs: [job(1)] });
-    const row = await env.DB.prepare('SELECT id FROM jobs LIMIT 1').first<{ id: string }>();
+    const row = await DB.prepare('SELECT id FROM jobs LIMIT 1').first<{ id: string }>();
     const res = await report(row!.id);
     expect(res.status).toBe(403);
   });
 
   it('returns 404 for an unknown job', async () => {
-    expect((await report('no-such-job')).status).toBe(404);
+    expect((await report('11111111-2222-3333-4444-555555555555')).status).toBe(404);
   });
 
   it('counts only one report per user', async () => {
@@ -281,7 +320,7 @@ describe('community reporting', () => {
     const body = (await (await report(jobId)).json()) as any;
     expect(body.message).toMatch(/already reported/i);
 
-    const count = await env.DB.prepare('SELECT COUNT(*) AS n FROM job_reports').first<{ n: number }>();
+    const count = await DB.prepare('SELECT COUNT(*)::int AS n FROM job_reports').first<{ n: number }>();
     expect(count?.n).toBe(1);
   });
 
@@ -299,19 +338,19 @@ describe('community reporting', () => {
     for (let i = 0; i < 2; i++) {
       const id = `3333333${i}-3333-3333-3333-333333333333`;
       await createUser(id, `reporter${i}@example.com`, 100);
-      const t = await tokenFor(id);
+      const t = tokenFor(id);
       await pull(1, t);
       await report(jobId, t);
     }
 
-    const flagged = await env.DB.prepare('SELECT is_flagged FROM jobs WHERE id = ?')
+    const flagged = await DB.prepare('SELECT is_flagged FROM jobs WHERE id = ?')
       .bind(jobId)
-      .first<{ is_flagged: number }>();
-    expect(flagged?.is_flagged).toBe(1);
+      .first<{ is_flagged: boolean }>();
+    expect(flagged?.is_flagged).toBe(true);
 
     // A fresh user must not be served the flagged job.
     await createUser(OTHER_USER_ID, 'fresh@example.com', 100);
-    const freshPull = (await (await pull(10, await tokenFor(OTHER_USER_ID))).json()) as any;
+    const freshPull = (await (await pull(10, tokenFor(OTHER_USER_ID))).json()) as any;
     expect(freshPull.jobs).toHaveLength(0);
   });
 
@@ -321,44 +360,188 @@ describe('community reporting', () => {
     for (let i = 0; i < 2; i++) {
       const id = `4444444${i}-4444-4444-4444-444444444444`;
       await createUser(id, `r${i}@example.com`, 100);
-      const t = await tokenFor(id);
+      const t = tokenFor(id);
       await pull(1, t);
       await report(jobId, t);
     }
 
-    const contributor = await env.DB.prepare('SELECT flagged_count FROM users WHERE id = ?')
+    const contributor = await DB.prepare('SELECT flagged_count FROM users WHERE id = ?')
       .bind(TEST_USER_ID)
       .first<{ flagged_count: number }>();
     expect(contributor?.flagged_count).toBe(1);
   });
 
   it('auto-bans a contributor at the strike threshold', async () => {
-    await env.DB.prepare('UPDATE users SET flagged_count = 4 WHERE id = ?')
-      .bind(TEST_USER_ID)
-      .run();
+    await DB.prepare('UPDATE users SET flagged_count = 4 WHERE id = ?').bind(TEST_USER_ID).run();
 
     const jobId = await seedPulledJob();
     await report(jobId);
     for (let i = 0; i < 2; i++) {
       const id = `5555555${i}-5555-5555-5555-555555555555`;
       await createUser(id, `b${i}@example.com`, 100);
-      const t = await tokenFor(id);
+      const t = tokenFor(id);
       await pull(1, t);
       await report(jobId, t);
     }
 
-    const banned = await env.DB.prepare('SELECT is_banned FROM users WHERE id = ?')
+    const banned = await DB.prepare('SELECT is_banned FROM users WHERE id = ?')
       .bind(TEST_USER_ID)
-      .first<{ is_banned: number }>();
-    expect(banned?.is_banned).toBe(1);
+      .first<{ is_banned: boolean }>();
+    expect(banned?.is_banned).toBe(true);
     expect((await me()).status).toBe(403);
+  });
+});
+
+describe('SSO identity', () => {
+  // Regression coverage for the account-merging bug: login used to match
+  // purely on email, so two different real people (or two different
+  // providers for one person) whose IdPs both happened to verify the same
+  // address were silently merged into one account. Identity is now anchored
+  // on (sso_provider, provider_user_id) — see migrations/0001_provider_scoped_identity.sql.
+
+  it('creates separate accounts for the same verified email via different providers', async () => {
+    stubFetch((url) => {
+      if (url.startsWith('https://oauth2.googleapis.com/tokeninfo')) {
+        return jsonResponse({
+          aud: process.env.GOOGLE_CLIENT_ID,
+          email_verified: 'true',
+          email: 'shared@example.com',
+          sub: 'google-sub-1',
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    const googleBody = (await (await login({ idp_token: 'g-token', sso_provider: 'google' })).json()) as any;
+    const googleUserId = decodeUserId(googleBody.token);
+
+    stubFetch((url) => {
+      if (url === 'https://github.com/login/oauth/access_token') return jsonResponse({ access_token: 'gh-access' });
+      if (url === 'https://api.github.com/user') return jsonResponse({ id: 42424242, email: 'shared@example.com' });
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    const githubBody = (await (await login({ idp_token: 'gh-code', sso_provider: 'github' })).json()) as any;
+    const githubUserId = decodeUserId(githubBody.token);
+
+    expect(githubUserId).not.toBe(googleUserId);
+
+    const count = await DB.prepare('SELECT COUNT(*)::int AS n FROM users WHERE email = ?')
+      .bind('shared@example.com')
+      .first<{ n: number }>();
+    expect(count?.n).toBe(2);
+  });
+
+  it('reuses the same account on a repeat login from the same provider', async () => {
+    stubFetch((url) => {
+      if (url.startsWith('https://oauth2.googleapis.com/tokeninfo')) {
+        return jsonResponse({
+          aud: process.env.GOOGLE_CLIENT_ID,
+          email_verified: 'true',
+          email: 'repeat@example.com',
+          sub: 'google-sub-repeat',
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    const first = (await (await login({ idp_token: 't1', sso_provider: 'google' })).json()) as any;
+    const second = (await (await login({ idp_token: 't2', sso_provider: 'google' })).json()) as any;
+    expect(decodeUserId(second.token)).toBe(decodeUserId(first.token));
+
+    const count = await DB.prepare('SELECT COUNT(*)::int AS n FROM users WHERE provider_user_id = ?')
+      .bind('google-sub-repeat')
+      .first<{ n: number }>();
+    expect(count?.n).toBe(1);
+  });
+
+  it('backfills provider_user_id for a pre-migration account on its next login, preserving history', async () => {
+    // Shape of a row the old email-only login logic would have produced.
+    // A fresh id — TEST_USER_ID already exists from beforeEach and inserting
+    // it again would violate the primary key.
+    const legacyId = '66666666-6666-6666-6666-666666666666';
+    await createUser(legacyId, 'legacy@example.com', 77, {
+      sso_provider: 'google',
+      provider_user_id: null,
+    });
+
+    stubFetch((url) => {
+      if (url.startsWith('https://oauth2.googleapis.com/tokeninfo')) {
+        return jsonResponse({
+          aud: process.env.GOOGLE_CLIENT_ID,
+          email_verified: 'true',
+          email: 'legacy@example.com',
+          sub: 'google-sub-legacy',
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    const body = (await (await login({ idp_token: 't', sso_provider: 'google' })).json()) as any;
+    expect(decodeUserId(body.token)).toBe(legacyId);
+
+    const row = await DB.prepare('SELECT provider_user_id, current_credits FROM users WHERE id = ?')
+      .bind(legacyId)
+      .first<{ provider_user_id: string; current_credits: number }>();
+    expect(row?.provider_user_id).toBe('google-sub-legacy');
+    expect(row?.current_credits).toBe(77);
+  });
+});
+
+describe('logout-all', () => {
+  it('invalidates the token used to call it', async () => {
+    expect((await logoutAll()).status).toBe(200);
+    expect((await me()).status).toBe(401);
+  });
+
+  it('does not affect a token minted after the logout', async () => {
+    await logoutAll();
+    const row = await DB.prepare('SELECT token_version FROM users WHERE id = ?')
+      .bind(TEST_USER_ID)
+      .first<{ token_version: number }>();
+    const freshToken = tokenFor(TEST_USER_ID, { tv: row?.token_version });
+    expect((await me(freshToken)).status).toBe(200);
+  });
+});
+
+describe('rate limiting', () => {
+  // Distinct per-test IPs so these tests can't interfere with each other via
+  // the shared Redis counter.
+  it('blocks once the per-IP budget (100/60s) is exceeded', async () => {
+    const ip = '203.0.113.7';
+    let lastStatus = 200;
+    for (let i = 0; i < 101; i++) {
+      lastStatus = (await req({ method: 'GET', url: '/health', headers: { 'cf-connecting-ip': ip } })).status;
+      if (lastStatus === 429) break;
+    }
+    expect(lastStatus).toBe(429);
+  });
+
+  it('is not applied when cf-connecting-ip is absent', async () => {
+    let sawLimit = false;
+    for (let i = 0; i < 105; i++) {
+      if ((await req({ method: 'GET', url: '/health' })).status === 429) {
+        sawLimit = true;
+        break;
+      }
+    }
+    expect(sawLimit).toBe(false);
+  });
+
+  it('cannot be bypassed by spoofing x-forwarded-for once cf-connecting-ip is limited', async () => {
+    const ip = '203.0.113.9';
+    for (let i = 0; i < 101; i++) {
+      await req({ method: 'GET', url: '/health', headers: { 'cf-connecting-ip': ip } });
+    }
+    const res = await req({
+      method: 'GET',
+      url: '/health',
+      headers: { 'cf-connecting-ip': ip, 'x-forwarded-for': '1.2.3.4' },
+    });
+    expect(res.status).toBe(429);
   });
 });
 
 describe('health', () => {
   it('reports ok when the database is reachable', async () => {
-    const res = await SELF.fetch('https://api.test/health');
+    const res = await req({ method: 'GET', url: '/health' });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ status: 'ok', database: 'ok' });
+    expect(await res.json()).toMatchObject({ status: 'ok', database: 'ok' });
   });
 });

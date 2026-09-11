@@ -4,9 +4,9 @@ info:
   description: A centralized crowdsourcing API for an open-source job scraping tool featuring a Give-to-Get credit economy.
   version: 1.0.0
 servers:
-  - url: https://career-agent-api.kotesh-rv.workers.dev
-    description: Production Server
-  - url: http://localhost:8787
+  - url: https://career-agent-api.example.com
+    description: Production Server (behind your Cloudflare Tunnel hostname)
+  - url: http://localhost:3000
     description: Local Development Server
 
 components:
@@ -105,9 +105,34 @@ paths:
                     type: integer
                     example: 604800
         '400':
-          description: Missing parameters or failed to extract email from IdP.
+          description: Missing parameters or failed to extract email/account id from IdP.
         '401':
           description: Invalid IdP token or GitHub code exchange failed.
+
+  /api/auth/logout-all:
+    post:
+      summary: Log Out Everywhere
+      description: >
+        Invalidates every previously-issued JWT for this account, including
+        the one used to call this endpoint. JWTs are stateless and not
+        tracked individually, so revocation is all-or-nothing per account —
+        there is no way to revoke a single session.
+      responses:
+        '200':
+          description: All tokens for this account are now invalid.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  message:
+                    type: string
+        '401':
+          description: Missing, invalid, expired, or already-revoked token.
+        '403':
+          description: User is banned.
 
   /api/jobs/push:
     post:

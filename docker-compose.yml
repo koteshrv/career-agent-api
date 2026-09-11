@@ -4,8 +4,14 @@ services:
   api:
     image: ghcr.io/koteshrv/career-agent-api:latest
     restart: unless-stopped
-    ports:
-      - "3000:3000"
+    # No `ports:` mapping on purpose. The app trusts the `CF-Connecting-IP`
+    # header for rate limiting and it's only safe to trust because Cloudflare's
+    # edge is guaranteed to be the sole path to this container — the
+    # `cloudflared` service below reaches it over the internal db-network only.
+    # Publishing 3000 to the host here would open a second, non-Cloudflare
+    # path that can set that header to anything. For local debugging, publish
+    # a port explicitly with `docker compose run --service-ports` instead of
+    # adding it back here.
     environment:
       - DATABASE_URL=postgres://careeragent:secretpassword@postgres:5432/careeragent
       - REDIS_URL=redis://redis:6379
@@ -22,6 +28,19 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    networks:
+      - db-network
+
+  # The only ingress path to `api`. Runs as an outbound-only connection to
+  # Cloudflare's edge (no inbound port needed), which is what makes trusting
+  # CF-Connecting-IP in the app safe — as long as `api` is never also given a
+  # host port mapping alongside this.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel run --token ${TUNNEL_TOKEN}
+    depends_on:
+      - api
     networks:
       - db-network
 

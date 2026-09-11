@@ -8,6 +8,35 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    # test/api.test.ts runs real requests through the app against a real
+    # Postgres and Redis (see test/setup.ts) rather than mocking either —
+    # these services stand in for what docker-compose.yml provisions in prod.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+      REDIS_URL: redis://localhost:6379
     steps:
       - uses: actions/checkout@v4
 
@@ -19,7 +48,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # Catches the class of error that once shipped a non-compiling worker to main.
+      # Catches the class of error that once shipped a non-compiling app to main.
       - name: Type check
         run: npm run typecheck
 

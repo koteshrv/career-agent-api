@@ -1,5 +1,4 @@
 node_modules/
-.wrangler/
 dist/
 .env
 .dev.vars
@@ -7,6 +6,5 @@ dist/
 *.sqlite
 *.sqlite3
 *.db
-
-wrangler.prod.toml
 data.sql
+.vscode/

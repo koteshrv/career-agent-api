@@ -1,0 +1,16 @@
+node_modules
+dist
+.git
+.env
+.dev.vars
+*.sqlite
+*.sqlite3
+*.db
+data.sql
+test
+migrations
+postman
+DATABASE_QUERIES.md
+README.md
+.github
+.vscode

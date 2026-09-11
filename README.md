@@ -2,9 +2,11 @@
 
 A centralized crowdsourcing API for the open-source CareerAgent job automation tool. This API serves as the global job-sharing network.
 
-Built with **Node.js, Hono, PostgreSQL, and Redis**.
+Built with **Node.js, Fastify, PostgreSQL, and Redis**.
 
 It features an asymmetric (RS256) JWT-based SSO system (GitHub & Google) and a "Give-to-Get" credit economy to bypass global IP scraping bans by decentralizing the fetching across the community.
+
+Accounts are identified by `(sso_provider, provider_user_id)` — the IdP's own stable subject id — not by email, since the same email can be independently verified by two different providers (or reassigned at the IdP over time). Logging in from a new provider always creates a separate account, even if the email matches one you already have.
 
 ---
 
@@ -28,11 +30,22 @@ docker compose up -d
 ```
 
 ### 3. Initialize the Database
-Once Postgres is running, you must import the database schema to create the tables.
+Once Postgres is running, you must import the database schema to create the tables. `schema.sql` only creates tables — it doesn't drop anything, so it errors loudly (rather than touching data) if run against a database that already has them.
 ```bash
 cat schema.sql | docker exec -i $(docker compose ps -q postgres) psql -U careeragent -d careeragent
 ```
-*(Warning: Running this command will drop and recreate all tables. Only run it once during initial setup).*
+*(For a brand-new database only. See below for upgrading an existing deployment.)*
+
+### 4. Configure the Cloudflare Tunnel
+`docker-compose.yml` runs `cloudflared` as the API's only path to the internet — `api` publishes no host port on purpose, so the tunnel is what makes it safe for the app to trust the `CF-Connecting-IP` header for rate limiting (see Security notes below). Create a tunnel in the Cloudflare dashboard, point its public hostname at `http://api:3000`, and put its token in `.env` as `TUNNEL_TOKEN`.
+
+### Upgrading an Existing Deployment
+`schema.sql` is the schema for a fresh install. An existing deployment must instead apply each new file under [migrations/](migrations/), in order, exactly once:
+```bash
+cat migrations/0001_provider_scoped_identity.sql | docker exec -i $(docker compose ps -q postgres) psql -U careeragent -d careeragent
+cat migrations/0002_token_version.sql | docker exec -i $(docker compose ps -q postgres) psql -U careeragent -d careeragent
+```
+Each migration documents what it changes and why in its own header comment, and is safe to run more than once (every statement is guarded).
 
 ---
 
@@ -46,7 +59,11 @@ npm install
 ```
 
 ### 2. Set up local services
-You will need a local PostgreSQL and Redis instance running. You can easily start these using the provided Docker compose file (just comment out the `api` service), or run them natively. Ensure your `.env` is updated with `localhost` URLs.
+You will need a local PostgreSQL and Redis instance running. The easiest way is to start just those two from the compose file:
+```bash
+docker compose up -d postgres redis
+```
+Ensure your `.env` has `DATABASE_URL`/`REDIS_URL` pointed at `localhost`. Rate limiting reads the `CF-Connecting-IP` header, which nothing sets locally — requests simply aren't rate-limited outside the tunnel-fronted deployment described above.
 
 ### 3. Run the development server
 ```bash
@@ -63,4 +80,5 @@ npm test
 
 ## 🔒 Security & Architecture Notes
 * **Network Isolation**: The `docker-compose.yml` is configured with strict network separation. The API talks to Postgres and Redis over an isolated internal `db-network`.
-* **Exposing the API**: The API binds to port `3000`. It is highly recommended to expose this to the internet via a reverse proxy (like Nginx, Caddy) or a Cloudflare Tunnel for SSL termination.
+* **Exposing the API**: `api` has no published host port — `cloudflared` (also on `db-network`) is the only path in, connecting outbound to Cloudflare's edge. This is load-bearing, not just for TLS: the app trusts the edge-set `CF-Connecting-IP` header for rate limiting, which is only safe because nothing else can reach the container directly. Don't add a `ports:` mapping back onto `api` without also changing how IPs are trusted in [src/app.ts](src/app.ts).
+* **Revoking a token**: `POST /api/auth/logout-all` (authenticated) invalidates every JWT previously issued to that account. There's no single-session revocation — JWTs aren't tracked individually, so it's all-or-nothing per account.

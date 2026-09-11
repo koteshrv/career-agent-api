@@ -13,8 +13,8 @@
           "script": {
             "exec": [
               "var jsonData = pm.response.json();",
-              "if (jsonData.access_token) {",
-              "    pm.collectionVariables.set(\"jwt_token\", jsonData.access_token);",
+              "if (jsonData.token || jsonData.access_token) {",
+              "    pm.collectionVariables.set(\"jwt_token\", jsonData.token || jsonData.access_token);",
               "    console.log(\"JWT Token saved to collection variables!\");",
               "}"
             ],
@@ -209,7 +209,7 @@
             "health"
           ]
         },
-        "description": "Unauthenticated liveness probe; also verifies the D1 binding responds."
+        "description": "Unauthenticated liveness probe; also verifies the PostgreSQL database responds."
       },
       "response": []
     }
@@ -217,7 +217,7 @@
   "variable": [
     {
       "key": "base_url",
-      "value": "http://localhost:8787",
+      "value": "http://localhost:3000",
       "type": "string"
     },
     {

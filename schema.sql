@@ -2,8 +2,18 @@
 
 CREATE TABLE users (
     id UUID PRIMARY KEY,
-    email TEXT UNIQUE NOT NULL,
+    -- Not UNIQUE on its own: the same verified email can legitimately belong to
+    -- two different provider identities (e.g. Google and GitHub), which must be
+    -- kept as separate accounts. See provider_user_id below for the real identity key.
+    email TEXT NOT NULL,
     sso_provider TEXT NOT NULL,
+    -- The IdP's own stable subject identifier (Google's `sub`, GitHub's numeric
+    -- `id`), NOT the email. Identity is anchored here because emails can be
+    -- reassigned/changed at the IdP; a stable external id can't be.
+    -- Nullable only to support the one-time backfill of accounts created before
+    -- this column existed (see migrations/0001_provider_scoped_identity.sql) --
+    -- every row written by the current login code always sets it.
+    provider_user_id TEXT,
     current_credits INTEGER DEFAULT 50,
     total_pushed INTEGER DEFAULT 0,
     total_pulled INTEGER DEFAULT 0,
@@ -13,9 +23,21 @@ CREATE TABLE users (
     last_push_date DATE,
     flagged_count INTEGER DEFAULT 0,
     is_banned BOOLEAN DEFAULT FALSE,
+    -- Bumped by POST /api/auth/logout-all to invalidate every JWT issued
+    -- before that point (each token embeds the version it was signed with;
+    -- the auth middleware rejects a mismatch even though the signature is
+    -- still valid). Lets a user respond to a leaked token without waiting
+    -- out its full expiry.
+    token_version INTEGER NOT NULL DEFAULT 0,
     last_login_ip TEXT,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    -- The true identity key. Multiple NULL provider_user_id rows are allowed by
+    -- Postgres (NULL is never equal to NULL) so pre-migration rows coexist fine
+    -- until they're backfilled on next login.
+    UNIQUE (sso_provider, provider_user_id)
 );
+
+CREATE INDEX idx_users_email ON users(email);
 
 CREATE TABLE jobs (
     id UUID PRIMARY KEY,

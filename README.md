@@ -44,8 +44,17 @@ cat schema.sql | docker exec -i $(docker compose ps -q postgres) psql -U careera
 ```bash
 cat migrations/0001_provider_scoped_identity.sql | docker exec -i $(docker compose ps -q postgres) psql -U careeragent -d careeragent
 cat migrations/0002_token_version.sql | docker exec -i $(docker compose ps -q postgres) psql -U careeragent -d careeragent
+cat migrations/0003_admin_role.sql | docker exec -i $(docker compose ps -q postgres) psql -U careeragent -d careeragent
+cat migrations/0004_nullable_job_contributor.sql | docker exec -i $(docker compose ps -q postgres) psql -U careeragent -d careeragent
 ```
 Each migration documents what it changes and why in its own header comment, and is safe to run more than once (every statement is guarded).
+
+### Bootstrapping an Admin
+There's no self-service way to become an admin. After applying `migrations/0003_admin_role.sql`:
+```sql
+UPDATE users SET is_admin = true WHERE email = 'you@example.com';
+```
+From there, `/api/admin/*` (see `openapi.yaml`) covers granting credits, banning/unbanning, and un-flagging jobs — see [DATABASE_QUERIES.md](DATABASE_QUERIES.md) for the raw-SQL fallback.
 
 ---
 
@@ -82,3 +91,6 @@ npm test
 * **Network Isolation**: The `docker-compose.yml` is configured with strict network separation. The API talks to Postgres and Redis over an isolated internal `db-network`.
 * **Exposing the API**: `api` has no published host port — `cloudflared` (also on `db-network`) is the only path in, connecting outbound to Cloudflare's edge. This is load-bearing, not just for TLS: the app trusts the edge-set `CF-Connecting-IP` header for rate limiting, which is only safe because nothing else can reach the container directly. Don't add a `ports:` mapping back onto `api` without also changing how IPs are trusted in [src/app.ts](src/app.ts).
 * **Revoking a token**: `POST /api/auth/logout-all` (authenticated) invalidates every JWT previously issued to that account. There's no single-session revocation — JWTs aren't tracked individually, so it's all-or-nothing per account.
+* **Your data**: `GET /api/me/export` returns everything tied to your account (profile, jobs contributed/pulled, reports filed). `DELETE /api/me` (with `{"confirm": true}`) erases your account and its activity records — jobs you contributed stay in the shared pool with their attribution to you removed, rather than being deleted out from under everyone who's already pulled them.
+* **Admin API**: `/api/admin/*` requires `is_admin` on your account (bootstrapped by hand — see above). A non-admin gets `404` from these routes, not `403`, so they can't be distinguished from a typo'd path.
+* **Login rate limiting**: `/api/auth/login` has its own tighter budget (20 requests/60s per IP) on top of the general 100/60s applied everywhere else, since it's the highest-value target for credential stuffing.

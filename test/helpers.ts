@@ -22,13 +22,20 @@ export async function createUser(
   id: string,
   email: string,
   credits: number,
-  overrides: { sso_provider?: string; provider_user_id?: string | null } = {}
+  overrides: { sso_provider?: string; provider_user_id?: string | null; is_admin?: boolean } = {}
 ): Promise<void> {
   const { DB } = await import('../src/db');
   await DB.prepare(
-    'INSERT INTO users (id, email, sso_provider, provider_user_id, current_credits) VALUES (?, ?, ?, ?, ?)'
+    'INSERT INTO users (id, email, sso_provider, provider_user_id, current_credits, is_admin) VALUES (?, ?, ?, ?, ?, ?)'
   )
-    .bind(id, email, overrides.sso_provider ?? 'github', overrides.provider_user_id ?? null, credits)
+    .bind(
+      id,
+      email,
+      overrides.sso_provider ?? 'github',
+      overrides.provider_user_id ?? null,
+      credits,
+      overrides.is_admin ?? false
+    )
     .run();
 }
 

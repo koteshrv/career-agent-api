@@ -2,9 +2,19 @@
 
 This document contains useful SQL queries for administering, testing, and debugging the `career-agent-api` PostgreSQL database.
 
+**Most moderation actions below now have an authenticated `/api/admin/*` endpoint** (see `openapi.yaml`) — prefer those over raw SQL where one exists, since they're audited, validated, and don't need direct database access. The queries stay here for the one thing the API can't do (bootstrapping the very first admin account) and as an emergency fallback if the API itself is unreachable.
+
 ## 👥 User Management & Moderation
 
+### Bootstrap the first admin account
+There's no self-service way to become an admin — this is the one operation with no API equivalent, by design.
+```sql
+UPDATE users SET is_admin = true WHERE email = 'you@example.com';
+```
+After this, use `POST /api/admin/users/:id/credits`, `/ban`, `/unban`, and `GET /api/admin/jobs/flagged` + `POST /api/admin/jobs/:id/unflag` instead of the raw SQL below.
+
 ### Grant a user 50,000 API Credits (Admin Bypass)
+Prefer `POST /api/admin/users/:id/credits` with `{"credits": 50000}`.
 ```sql
 UPDATE users 
 SET current_credits = 50000 
@@ -12,7 +22,7 @@ WHERE email = 'user@example.com';
 ```
 
 ### Reset a user's Daily Free Quota
-Useful when you want to bypass the daily 100-job limit during local testing without changing the date.
+Useful when you want to bypass the daily 50-job limit during local testing without changing the date.
 ```sql
 UPDATE users 
 SET pulled_today = 0 
@@ -29,6 +39,7 @@ LIMIT 10;
 ```
 
 ### Manually Ban or Unban a User
+Prefer `POST /api/admin/users/:id/ban` / `/unban`.
 ```sql
 -- Ban
 UPDATE users SET is_banned = true WHERE email = 'spammer@example.com';
@@ -51,7 +62,7 @@ ORDER BY created_at DESC;
 ```
 
 ### Un-flag a False Positive Job
-If a job was maliciously reported, you can restore it to the global pool.
+If a job was maliciously reported, you can restore it to the global pool. Prefer `POST /api/admin/jobs/:id/unflag` (and `GET /api/admin/jobs/flagged` to find it).
 ```sql
 UPDATE jobs SET is_flagged = false WHERE id = 'job_id_here';
 ```
@@ -78,11 +89,11 @@ SELECT
 
 ## 🚨 System Integrity & Debugging
 
-### Check for Orphaned Jobs
-Jobs that were uploaded by a user who has since been deleted from the database (should be 0 if foreign keys cascade properly).
+### Find Jobs Whose Contributor Deleted Their Account
+`scraped_by_user_id` is nullable and set null (not cascade-deleted) when a contributor uses self-service account deletion (`DELETE /api/me`) — the job itself is kept, since it's a shared resource other users may already rely on. This is expected/normal, not data corruption; use it to see how many jobs currently have no attributed contributor.
 ```sql
 SELECT * FROM jobs 
-WHERE scraped_by_user_id NOT IN (SELECT id FROM users);
+WHERE scraped_by_user_id IS NULL;
 ```
 
 ### Find Who Uploaded a Specific Job

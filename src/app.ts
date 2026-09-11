@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 // in production logs, and printed 2-3x per boot since db.ts/redis.ts each
 // call dotenv.config() too).
 dotenv.config({ quiet: true });
-import Fastify, { FastifyRequest, FastifyReply } from 'fastify';
+import Fastify, { FastifyRequest, FastifyReply, FastifyError } from 'fastify';
 import jwt from 'jsonwebtoken';
 import { DB } from "./db";
 import { checkRateLimit } from "./redis";
@@ -37,7 +37,7 @@ type Variables = {
 const app = Fastify({ logger: true, trustProxy: false, bodyLimit: 5 * 1024 * 1024 });
 declare module 'fastify' {
   interface FastifyRequest {
-    user?: { id: string; email: string; };
+    user?: { id: string; email: string; is_admin: boolean; };
   }
 }
 
@@ -62,7 +62,7 @@ app.register(cors, {
     if (!origin || allowed.includes(origin)) { cb(null, true); } else { cb(null, false); }
   },
   allowedHeaders: ['Content-Type', 'Authorization'],
-  methods: ['POST', 'GET', 'OPTIONS'],
+  methods: ['POST', 'GET', 'DELETE', 'OPTIONS'],
   maxAge: 600,
 });
 
@@ -144,9 +144,11 @@ const authMiddleware = async (request: FastifyRequest, reply: FastifyReply) => {
   }
 
   // Validate user state in the database
-  const user = await DB.prepare('SELECT id, email, is_banned, token_version FROM users WHERE id = ?')
+  const user = await DB.prepare(
+    'SELECT id, email, is_banned, token_version, is_admin FROM users WHERE id = ?'
+  )
     .bind(payload.id)
-    .first<{ id: string; email: string; is_banned: number; token_version: number }>();
+    .first<{ id: string; email: string; is_banned: number; token_version: number; is_admin: boolean }>();
 
   if (!user) {
     return reply.status(401).send({ error: 'User not found' });
@@ -166,7 +168,20 @@ const authMiddleware = async (request: FastifyRequest, reply: FastifyReply) => {
   }
 
   // Attach user payload to the request context for downstream routes
-    request.user = { id: user.id, email: user.email };
+    request.user = { id: user.id, email: user.email, is_admin: user.is_admin };
+};
+
+/**
+ * --- Admin Authorization Middleware ---
+ * Chained after authMiddleware (which must run first — this only reads
+ * request.user, it doesn't authenticate on its own). Gates /api/admin/*.
+ * There's no self-service way to become an admin; see is_admin in schema.sql.
+ */
+const adminMiddleware = async (request: FastifyRequest, reply: FastifyReply) => {
+  if (!request.user?.is_admin) {
+    // 404, not 403: a non-admin gets no signal that these routes exist at all.
+    return reply.status(404).send({ error: 'Not found' });
+  }
 };
 
 /**
@@ -217,12 +232,29 @@ const isValidJobUrl = (value: string): boolean => {
 // --- API Routes ---
 
 /**
+ * Tighter, dedicated limit for /api/auth/login on top of the blanket global
+ * one above — it's the highest-value target for credential stuffing /
+ * brute-forcing IdP tokens, and 100/60s (fine for the rest of the API) is far
+ * too generous for an auth endpoint specifically. 20/60s comfortably covers
+ * a real user retrying a few times (e.g. after an expired OAuth code).
+ */
+const loginRateLimitMiddleware = async (request: FastifyRequest, reply: FastifyReply) => {
+  const ip = request.headers['cf-connecting-ip'] as string | undefined;
+  if (ip) {
+    const isAllowed = await checkRateLimit(ip, 20, 60, 'login');
+    if (!isAllowed) {
+      return reply.status(429).send({ error: 'Too Many Requests' });
+    }
+  }
+};
+
+/**
  * POST /api/auth/login
  * SSO Login Endpoint. In a full production implementation, this endpoint would verify
  * an IdP-issued JWT (e.g., from Microsoft Entra or Google) against public JWKS before
  * issuing the internal API JWT.
  */
-app.post('/api/auth/login', async (request, reply) => {
+app.post('/api/auth/login', { preHandler: loginRateLimitMiddleware }, async (request, reply) => {
   // See the equivalent comment in /api/jobs/push: request.body is already
   // parsed by the time this handler runs (malformed JSON is rejected earlier
   // by Fastify itself, via the global error handler). The optional chaining
@@ -678,14 +710,21 @@ app.get('/api/jobs/pull', { preHandler: authMiddleware }, async (request, reply)
 
   // Exclude jobs this user has already pulled before so consuming the feed
   // actually advances instead of handing back the same newest N jobs forever.
+  // Fetches one row beyond what was reserved, purely to answer has_more below
+  // without a client having to spend a follow-up call to find out the pool is
+  // empty — trimmed back to what was actually reserved/paid for immediately
+  // after, so that lookahead row is never claimed, charged for, or marked seen.
   const candidates = await DB.prepare(
     `SELECT id, company, title, location, url, created_at FROM jobs
      WHERE is_flagged = false
        AND id NOT IN (SELECT job_id FROM pulled_jobs WHERE user_id = ?)
      ORDER BY created_at DESC LIMIT ?`
   )
-    .bind(user.id, reservation.want)
+    .bind(user.id, reservation.want + 1)
     .all();
+
+  const hasMore = candidates.results.length > reservation.want;
+  const toClaim = candidates.results.slice(0, reservation.want);
 
   // Claim each candidate via INSERT OR IGNORE on the (user_id, job_id) primary
   // key *before* trusting it as delivered. Two concurrent requests for the same
@@ -695,14 +734,14 @@ app.get('/api/jobs/pull', { preHandler: authMiddleware }, async (request, reply)
   // twice, not the SELECT filter above (which only stops *already-committed*
   // pulls from being re-served).
   let confirmed: any[] = [];
-  if (candidates.results.length > 0) {
+  if (toClaim.length > 0) {
     const markSeenStmt = DB.prepare(
       'INSERT INTO pulled_jobs (user_id, job_id) VALUES (?, ?) ON CONFLICT DO NOTHING'
     );
     const claimResults = await DB.batch(
-      candidates.results.map((job: any) => markSeenStmt.bind(user.id, job.id))
+      toClaim.map((job: any) => markSeenStmt.bind(user.id, job.id))
     );
-    confirmed = candidates.results.filter((_: any, i: number) => claimResults[i].meta.changes > 0);
+    confirmed = toClaim.filter((_: any, i: number) => claimResults[i].meta.changes > 0);
   }
 
   const jobsReturnedCount = confirmed.length;
@@ -739,6 +778,15 @@ app.get('/api/jobs/pull', { preHandler: authMiddleware }, async (request, reply)
     jobs: confirmed,
     deducted: reservation.fromCredits ? jobsReturnedCount : 0,
     quota_used: reservation.fromCredits ? 0 : jobsReturnedCount,
+    // Whether at least one more unconsumed, unflagged job existed beyond this
+    // batch at query time — a hint for whether to call again, not a hard
+    // guarantee (the pool is shared and shifts between requests). Since
+    // pulling costs credits/quota, this is deliberately not a stateful cursor:
+    // simply calling pull() again already advances through the corpus for
+    // free (pulled_jobs excludes anything this user has already received),
+    // so has_more only needs to answer "is it worth calling again," not "where
+    // exactly was I."
+    has_more: hasMore,
   });
 });
 
@@ -774,7 +822,10 @@ app.post('/api/jobs/report', { preHandler: authMiddleware }, async (request, rep
     'SELECT id, scraped_by_user_id, is_flagged FROM jobs WHERE id = ?'
   )
     .bind(job_id)
-    .first<{ id: string; scraped_by_user_id: string; is_flagged: boolean }>();
+    // scraped_by_user_id is nullable: the contributor may have since deleted
+    // their account (DELETE /api/me detaches the job rather than deleting it
+    // — see migrations/0004_nullable_job_contributor.sql).
+    .first<{ id: string; scraped_by_user_id: string | null; is_flagged: boolean }>();
 
   if (!job) {
     return reply.status(404).send({ error: 'Job not found' });
@@ -828,28 +879,32 @@ app.post('/api/jobs/report', { preHandler: authMiddleware }, async (request, rep
     if (flagResult.meta.changes > 0) {
       jobFlagged = true;
 
-      // Claw back the credit earned for this job and record a strike. Credits
-      // are floored at 0 rather than going negative, which would silently push
-      // the contributor into the free-quota branch of the pull economy.
-      const strike = await DB.prepare(
-        // GREATEST, not MAX: Postgres's MAX is aggregate-only (no two-argument
-        // scalar form) — this floors at 0 without going through an aggregate.
-        `UPDATE users
-         SET flagged_count = flagged_count + 1,
-             current_credits = GREATEST(0, current_credits - 1)
-         WHERE id = ?
-         RETURNING flagged_count`
-      )
-        .bind(job.scraped_by_user_id)
-        .first<{ flagged_count: number }>();
-
-      if (strike && strike.flagged_count >= FLAGS_TO_BAN_USER) {
-        const ban = await DB.prepare(
-          'UPDATE users SET is_banned = true WHERE id = ? AND is_banned = false'
+      // No strike to record if the contributor has since deleted their
+      // account — there's no user row left to credit it against.
+      if (job.scraped_by_user_id) {
+        // Claw back the credit earned for this job and record a strike. Credits
+        // are floored at 0 rather than going negative, which would silently push
+        // the contributor into the free-quota branch of the pull economy.
+        const strike = await DB.prepare(
+          // GREATEST, not MAX: Postgres's MAX is aggregate-only (no two-argument
+          // scalar form) — this floors at 0 without going through an aggregate.
+          `UPDATE users
+           SET flagged_count = flagged_count + 1,
+               current_credits = GREATEST(0, current_credits - 1)
+           WHERE id = ?
+           RETURNING flagged_count`
         )
           .bind(job.scraped_by_user_id)
-          .run();
-        contributorBanned = ban.meta.changes > 0;
+          .first<{ flagged_count: number }>();
+
+        if (strike && strike.flagged_count >= FLAGS_TO_BAN_USER) {
+          const ban = await DB.prepare(
+            'UPDATE users SET is_banned = true WHERE id = ? AND is_banned = false'
+          )
+            .bind(job.scraped_by_user_id)
+            .run();
+          contributorBanned = ban.meta.changes > 0;
+        }
       }
     }
   }
@@ -908,6 +963,226 @@ app.get('/api/me', { preHandler: authMiddleware }, async (request, reply) => {
 });
 
 /**
+ * GET /api/me/export
+ * Self-service data export: everything this account's own data touches —
+ * profile, jobs contributed, jobs pulled, reports filed. Community data other
+ * users generated (e.g. reports *against* this account's jobs) isn't this
+ * account's own data and isn't included.
+ */
+app.get('/api/me/export', { preHandler: authMiddleware }, async (request, reply) => {
+  const user = request.user!;
+
+  const profile = await DB.prepare(
+    `SELECT id, email, sso_provider, current_credits, total_pushed, total_pulled,
+            flagged_count, is_banned, created_at
+     FROM users WHERE id = ?`
+  )
+    .bind(user.id)
+    .first();
+
+  if (!profile) {
+    return reply.status(404).send({ error: 'User not found' });
+  }
+
+  const [contributed, pulled, reported] = await Promise.all([
+    DB.prepare(
+      `SELECT id, company, title, location, url, is_flagged, created_at
+       FROM jobs WHERE scraped_by_user_id = ? ORDER BY created_at DESC`
+    )
+      .bind(user.id)
+      .all(),
+    DB.prepare(
+      `SELECT j.id, j.company, j.title, j.url, p.pulled_at
+       FROM pulled_jobs p JOIN jobs j ON j.id = p.job_id
+       WHERE p.user_id = ? ORDER BY p.pulled_at DESC`
+    )
+      .bind(user.id)
+      .all(),
+    DB.prepare(
+      `SELECT job_id, reason, created_at FROM job_reports
+       WHERE reporter_user_id = ? ORDER BY created_at DESC`
+    )
+      .bind(user.id)
+      .all(),
+  ]);
+
+  return reply.send({
+    profile,
+    jobs_contributed: contributed.results,
+    jobs_pulled: pulled.results,
+    reports_filed: reported.results,
+  });
+});
+
+/**
+ * DELETE /api/me
+ * Self-service account deletion. Erases this account's own row (email, IP,
+ * credit/stat history) along with pulled_jobs/job_reports rows that
+ * reference it (ON DELETE CASCADE — those are this account's own activity
+ * records). Jobs this account contributed are NOT deleted: scraped_by_user_id
+ * is ON DELETE SET NULL (see migrations/0004_nullable_job_contributor.sql) —
+ * jobs are a shared resource other users may already rely on, not this
+ * account's personal data once contributed to the pool. This also
+ * immediately invalidates every JWT for the account, since authMiddleware's
+ * user lookup will simply find no row.
+ *
+ * Requires `{"confirm": true}` in the body — a bare DELETE (e.g. an
+ * accidental request from a buggy client) does nothing.
+ */
+app.delete('/api/me', { preHandler: authMiddleware }, async (request, reply) => {
+  const user = request.user!;
+  const body = request.body as any;
+
+  if (body?.confirm !== true) {
+    return reply.status(400).send({ error: 'Confirm deletion by sending {"confirm": true}' });
+  }
+
+  await DB.prepare('DELETE FROM users WHERE id = ?').bind(user.id).run();
+
+  return reply.send({ success: true, message: 'Account and personal data deleted.' });
+});
+
+/**
+ * --- Admin API ---
+ * Replaces the raw-SQL moderation workflow in DATABASE_QUERIES.md with
+ * authenticated, audited endpoints for the same operations. There's no
+ * self-service way to become an admin — bootstrap the first one directly:
+ *   UPDATE users SET is_admin = true WHERE email = 'you@example.com';
+ * adminMiddleware 404s (not 403) for a non-admin, so a logged-in
+ * non-admin poking at these paths can't distinguish them from a typo'd route.
+ */
+const ADMIN_MAX_CREDITS = 1_000_000;
+
+app.get(
+  '/api/admin/users',
+  { preHandler: [authMiddleware, adminMiddleware] },
+  async (request, reply) => {
+    const email = (request.query as any)?.email;
+    if (typeof email !== 'string' || email.length === 0) {
+      return reply.status(400).send({ error: 'Missing email query parameter' });
+    }
+    // Email is no longer unique (see provider_user_id) — a lookup can
+    // legitimately return more than one account.
+    const users = await DB.prepare(
+      `SELECT id, email, sso_provider, current_credits, total_pushed, total_pulled,
+              flagged_count, is_banned, is_admin, created_at
+       FROM users WHERE email = ? ORDER BY created_at ASC`
+    )
+      .bind(email)
+      .all();
+    return reply.send({ users: users.results });
+  }
+);
+
+app.get(
+  '/api/admin/users/:id',
+  { preHandler: [authMiddleware, adminMiddleware] },
+  async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const targetUser = await DB.prepare(
+      `SELECT id, email, sso_provider, current_credits, total_pushed, total_pulled,
+              flagged_count, is_banned, is_admin, created_at
+       FROM users WHERE id = ?`
+    )
+      .bind(id)
+      .first();
+    if (!targetUser) {
+      return reply.status(404).send({ error: 'User not found' });
+    }
+    return reply.send({ user: targetUser });
+  }
+);
+
+app.post(
+  '/api/admin/users/:id/credits',
+  { preHandler: [authMiddleware, adminMiddleware] },
+  async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const credits = (request.body as any)?.credits;
+    if (
+      typeof credits !== 'number' ||
+      !Number.isInteger(credits) ||
+      credits < 0 ||
+      credits > ADMIN_MAX_CREDITS
+    ) {
+      return reply
+        .status(400)
+        .send({ error: `credits must be an integer between 0 and ${ADMIN_MAX_CREDITS}` });
+    }
+    // Sets the absolute balance (matches DATABASE_QUERIES.md's "Grant a user
+    // N credits" pattern), not a delta — the caller decides the resulting total.
+    const result = await DB.prepare('UPDATE users SET current_credits = ? WHERE id = ?')
+      .bind(credits, id)
+      .run();
+    if (result.meta.changes === 0) {
+      return reply.status(404).send({ error: 'User not found' });
+    }
+    return reply.send({ success: true, current_credits: credits });
+  }
+);
+
+app.post(
+  '/api/admin/users/:id/ban',
+  { preHandler: [authMiddleware, adminMiddleware] },
+  async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const result = await DB.prepare('UPDATE users SET is_banned = true WHERE id = ?')
+      .bind(id)
+      .run();
+    if (result.meta.changes === 0) {
+      return reply.status(404).send({ error: 'User not found' });
+    }
+    return reply.send({ success: true });
+  }
+);
+
+app.post(
+  '/api/admin/users/:id/unban',
+  { preHandler: [authMiddleware, adminMiddleware] },
+  async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const result = await DB.prepare('UPDATE users SET is_banned = false WHERE id = ?')
+      .bind(id)
+      .run();
+    if (result.meta.changes === 0) {
+      return reply.status(404).send({ error: 'User not found' });
+    }
+    return reply.send({ success: true });
+  }
+);
+
+app.get(
+  '/api/admin/jobs/flagged',
+  { preHandler: [authMiddleware, adminMiddleware] },
+  async (request, reply) => {
+    const limitParam = parseInt((request.query as any)?.limit || '50', 10);
+    const limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam, 1), 200) : 50;
+    const jobs = await DB.prepare(
+      `SELECT id, company, title, location, url, scraped_by_user_id, created_at
+       FROM jobs WHERE is_flagged = true ORDER BY created_at DESC LIMIT ?`
+    )
+      .bind(limit)
+      .all();
+    return reply.send({ jobs: jobs.results });
+  }
+);
+
+app.post(
+  '/api/admin/jobs/:id/unflag',
+  { preHandler: [authMiddleware, adminMiddleware] },
+  async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const result = await DB.prepare('UPDATE jobs SET is_flagged = false WHERE id = ?')
+      .bind(id)
+      .run();
+    if (result.meta.changes === 0) {
+      return reply.status(404).send({ error: 'Job not found' });
+    }
+    return reply.send({ success: true });
+  }
+);
+
+/**
  * GET /health
  * Unauthenticated liveness/readiness probe for uptime monitoring.
  */
@@ -924,7 +1199,7 @@ app.get('/health', async (request, reply) => {
 /**
  * --- Global Error Handler ---
  */
-app.setErrorHandler((error, request, reply) => {
+app.setErrorHandler((error: FastifyError, request, reply) => {
   request.log.error(error);
   // Fastify itself assigns a 4xx statusCode for errors it catches before a
   // route handler ever runs — malformed JSON, a body over bodyLimit, an

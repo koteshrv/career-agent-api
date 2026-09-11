@@ -65,8 +65,8 @@ cat schema.sql | docker exec -i $(docker compose ps -q postgres) psql -U careera
 ```
 *(For a brand-new database only. See below for upgrading an existing deployment.)*
 
-### 4. Configure the Cloudflare Tunnel
-`docker-compose.yml` runs `cloudflared` as the API's only path to the internet — `api` publishes no host port on purpose, so the tunnel is what makes it safe for the app to trust the `CF-Connecting-IP` header for rate limiting (see Security notes below). Create a tunnel in the Cloudflare dashboard, point its public hostname at `http://api:3000`, and put its token in `.env` as `TUNNEL_TOKEN`.
+### 4. Expose the API
+`api` publishes no host port on purpose (see the comment in `docker-compose.yml`) — put a reverse proxy of your choice in front of it (nginx, Caddy, a tunneling service, whatever fits your setup), added as its own service on `db-network` and pointed at `api:3000`. Whatever you use, set `TRUSTED_IP_HEADER` in `.env` to the header that proxy sets with the real client IP (see Security notes below) — rate limiting and login IP logging depend on it, and fail safe (simply disabled) if it's left unset.
 
 ### Upgrading an Existing Deployment
 `schema.sql` is the schema for a fresh install. An existing deployment must instead apply each new file under [migrations/](migrations/), in order, exactly once:
@@ -102,7 +102,7 @@ You will need a local PostgreSQL and Redis instance running. The easiest way is 
 ```bash
 docker compose up -d postgres redis
 ```
-Ensure your `.env` has `DATABASE_URL`/`REDIS_URL` pointed at `localhost`. Rate limiting reads the `CF-Connecting-IP` header, which nothing sets locally — requests simply aren't rate-limited outside the tunnel-fronted deployment described above.
+Ensure your `.env` has `DATABASE_URL`/`REDIS_URL` pointed at `localhost`. Rate limiting reads whatever header `TRUSTED_IP_HEADER` names, which nothing sets locally unless you configure a local reverse proxy too — requests simply aren't rate-limited without it.
 
 ### 3. Run the development server
 ```bash
@@ -119,7 +119,7 @@ npm test
 
 ## 🔒 Security & Architecture Notes
 * **Network Isolation**: The `docker-compose.yml` is configured with strict network separation. The API talks to Postgres and Redis over an isolated internal `db-network`.
-* **Exposing the API**: `api` has no published host port — `cloudflared` (also on `db-network`) is the only path in, connecting outbound to Cloudflare's edge. This is load-bearing, not just for TLS: the app trusts the edge-set `CF-Connecting-IP` header for rate limiting, which is only safe because nothing else can reach the container directly. Don't add a `ports:` mapping back onto `api` without also changing how IPs are trusted in [src/app.ts](src/app.ts).
+* **Exposing the API**: `api` has no published host port — whatever reverse proxy you add (see [Expose the API](#4-expose-the-api) above) is meant to be the only path in. This is load-bearing, not just for TLS: the app trusts the header named by `TRUSTED_IP_HEADER` for rate limiting, which is only safe because nothing else can reach the container directly. Don't add a `ports:` mapping back onto `api` without also reconsidering `TRUSTED_IP_HEADER` — anything with a second, unproxied path to the container can set that header to whatever it wants.
 * **Revoking a token**: `POST /api/auth/logout-all` (authenticated) invalidates every JWT previously issued to that account. There's no single-session revocation — JWTs aren't tracked individually, so it's all-or-nothing per account.
 * **Your data**: `GET /api/me/export` returns everything tied to your account (profile, jobs contributed/pulled, reports filed). `DELETE /api/me` (with `{"confirm": true}`) erases your account and its activity records — jobs you contributed stay in the shared pool with their attribution to you removed, rather than being deleted out from under everyone who's already pulled them.
 * **Admin API**: `/api/admin/*` requires `is_admin` on your account (bootstrapped by hand — see above). A non-admin gets `404` from these routes, not `403`, so they can't be distinguished from a typo'd path.

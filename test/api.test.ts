@@ -583,13 +583,13 @@ describe('rate limiting', () => {
     const ip = '203.0.113.7';
     let lastStatus = 200;
     for (let i = 0; i < 101; i++) {
-      lastStatus = (await req({ method: 'GET', url: '/health', headers: { 'cf-connecting-ip': ip } })).status;
+      lastStatus = (await req({ method: 'GET', url: '/health', headers: { 'x-trusted-client-ip': ip } })).status;
       if (lastStatus === 429) break;
     }
     expect(lastStatus).toBe(429);
   });
 
-  it('is not applied when cf-connecting-ip is absent', async () => {
+  it('is not applied when the trusted IP header is absent', async () => {
     let sawLimit = false;
     for (let i = 0; i < 105; i++) {
       if ((await req({ method: 'GET', url: '/health' })).status === 429) {
@@ -600,15 +600,15 @@ describe('rate limiting', () => {
     expect(sawLimit).toBe(false);
   });
 
-  it('cannot be bypassed by spoofing x-forwarded-for once cf-connecting-ip is limited', async () => {
+  it('cannot be bypassed by spoofing x-forwarded-for once the trusted IP header is limited', async () => {
     const ip = '203.0.113.9';
     for (let i = 0; i < 101; i++) {
-      await req({ method: 'GET', url: '/health', headers: { 'cf-connecting-ip': ip } });
+      await req({ method: 'GET', url: '/health', headers: { 'x-trusted-client-ip': ip } });
     }
     const res = await req({
       method: 'GET',
       url: '/health',
-      headers: { 'cf-connecting-ip': ip, 'x-forwarded-for': '1.2.3.4' },
+      headers: { 'x-trusted-client-ip': ip, 'x-forwarded-for': '1.2.3.4' },
     });
     expect(res.status).toBe(429);
   });
@@ -695,7 +695,7 @@ describe('login rate limiting', () => {
         await req({
           method: 'POST',
           url: '/api/auth/login',
-          headers: { 'Content-Type': 'application/json', 'cf-connecting-ip': ip },
+          headers: { 'Content-Type': 'application/json', 'x-trusted-client-ip': ip },
           payload: {}, // missing idp_token/sso_provider -> fails validation, never calls out to a real IdP
         })
       ).status;
@@ -705,7 +705,7 @@ describe('login rate limiting', () => {
 
     // The global 100/60s budget for this same IP is untouched by the login
     // limiter hitting its own separate bucket.
-    const other = await req({ method: 'GET', url: '/health', headers: { 'cf-connecting-ip': ip } });
+    const other = await req({ method: 'GET', url: '/health', headers: { 'x-trusted-client-ip': ip } });
     expect(other.status).toBe(200);
   });
 });

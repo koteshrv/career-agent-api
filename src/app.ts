@@ -24,8 +24,8 @@ type Variables = {
  * Initialize the Hono application with strict typing for bindings and variables.
  */
 // trustProxy is intentionally off: nothing in this app reads request.ip (see
-// the cf-connecting-ip-only rate limiter and login IP logging below), so there
-// is no reason to have Fastify honor a client-settable X-Forwarded-For at all.
+// getTrustedClientIp below), so there is no reason to have Fastify honor a
+// client-settable X-Forwarded-For at all.
 //
 // bodyLimit is sized for the worst-case /api/jobs/push payload this API
 // actually accepts: 1000 jobs (its own hard cap, checked in the handler) at
@@ -87,18 +87,36 @@ app.register(helmet, {
 
 
 /**
+ * --- Trusted client IP ---
+ * Rate limiting and login IP logging need the real client IP, but this
+ * process may be sitting behind a reverse proxy (nginx, Caddy, a tunnel —
+ * whatever you've put in front of it) that terminates the actual internet-
+ * facing connection. TRUSTED_IP_HEADER names the header *that* proxy sets
+ * with the real client IP.
+ *
+ * This is only safe to trust if your proxy is the *sole* path to this
+ * process — see the deployment notes in README.md. If it isn't (e.g. this
+ * container's port is also published directly on the host), any client can
+ * set this header to whatever it wants and it will be trusted as-is: there's
+ * no way to distinguish a proxy-set value from a forged one at this layer.
+ * That's also why there's no default here and no fallback to
+ * X-Forwarded-For or request.ip: an unconfigured or wrongly-configured
+ * deployment should fail safe (rate limiting simply doesn't activate)
+ * rather than trust something spoofable by default.
+ */
+const TRUSTED_IP_HEADER = (process.env.TRUSTED_IP_HEADER || '').toLowerCase();
+
+function getTrustedClientIp(request: FastifyRequest): string | undefined {
+  if (!TRUSTED_IP_HEADER) return undefined;
+  const value = request.headers[TRUSTED_IP_HEADER];
+  return typeof value === 'string' ? value : undefined;
+}
+
+/**
  * --- Rate Limiting Middleware ---
  */
 app.addHook('onRequest', async (request, reply) => {
-  // cf-connecting-ip only, deliberately not x-forwarded-for: that header is
-  // client-settable unless something upstream is guaranteed to strip/overwrite
-  // it, which this deployment does not guarantee. cf-connecting-ip is safe to
-  // trust here specifically because Cloudflare's edge (via the cloudflared
-  // tunnel — see docker-compose.yml) is the only path to this process; it is
-  // set by the edge and can't be forged by the client. request.ip is not used
-  // as a fallback either, since behind the tunnel it's the connector's address,
-  // not the client's, and would incorrectly rate-limit all users as one.
-  const ip = request.headers['cf-connecting-ip'] as string | undefined;
+  const ip = getTrustedClientIp(request);
 
   if (ip) {
     // 100 requests per 60 seconds
@@ -239,7 +257,7 @@ const isValidJobUrl = (value: string): boolean => {
  * a real user retrying a few times (e.g. after an expired OAuth code).
  */
 const loginRateLimitMiddleware = async (request: FastifyRequest, reply: FastifyReply) => {
-  const ip = request.headers['cf-connecting-ip'] as string | undefined;
+  const ip = getTrustedClientIp(request);
   if (ip) {
     const isAllowed = await checkRateLimit(ip, 20, 60, 'login');
     if (!isAllowed) {
@@ -398,8 +416,8 @@ app.post('/api/auth/login', { preHandler: loginRateLimitMiddleware }, async (req
   }
 
   let userId: string;
-  // Same trust boundary as the rate limiter above: cf-connecting-ip only.
-  const clientIp = (request.headers['cf-connecting-ip'] as string | undefined) || 'unknown';
+  // Same trust boundary as the rate limiter above.
+  const clientIp = getTrustedClientIp(request) || 'unknown';
 
   if (!user) {
     // Register new user and award the initial Give-to-Get signup bonus

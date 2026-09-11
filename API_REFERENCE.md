@@ -16,7 +16,7 @@ Detailed request/response reference for every endpoint. For a machine-readable v
 ```
 A 4xx that Fastify itself generates before a route handler runs (malformed JSON, body over the size limit, an unmatched route) preserves Fastify's own status code and message rather than being collapsed to a generic 500.
 
-**Rate limiting**: applied globally, before every request, keyed on the `CF-Connecting-IP` header (only present when the deployment is actually fronted by the Cloudflare Tunnel described in `career-agent-infra`'s `docker-compose.yml` — absent in plain local development, so no rate limiting applies there):
+**Rate limiting**: applied globally, before every request, keyed on whichever header the deployment's `TRUSTED_IP_HEADER` env var names (only meaningful when the deployment is actually fronted by a reverse proxy that sets it — absent in plain local development, so no rate limiting applies there):
 - **Global**: 100 requests / 60s per IP, across the whole API.
 - **`POST /api/auth/login` specifically**: an additional, tighter 20 requests / 60s per IP, on top of the global budget — it's the highest-value target for credential stuffing.
 

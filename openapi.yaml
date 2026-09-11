@@ -5,7 +5,7 @@ info:
   version: 1.0.0
 servers:
   - url: https://career-agent-api.example.com
-    description: Production Server (behind your Cloudflare Tunnel hostname)
+    description: Production Server (behind your reverse proxy's public hostname)
   - url: http://localhost:3000
     description: Local Development Server
 

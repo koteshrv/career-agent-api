@@ -21,10 +21,42 @@ type Variables = {
 };
 
 /**
+ * --- Trusted client IP ---
+ * Rate limiting and login IP logging need the real client IP, but this
+ * process may be sitting behind a reverse proxy (nginx, Caddy, a tunnel —
+ * whatever you've put in front of it) that terminates the actual internet-
+ * facing connection. TRUSTED_IP_HEADER names the header *that* proxy sets
+ * with the real client IP.
+ *
+ * This is only safe to trust if your proxy is the *sole* path to this
+ * process — see the deployment notes in README.md. If it isn't (e.g. this
+ * container's port is also published directly on the host), any client can
+ * set this header to whatever it wants and it will be trusted as-is: there's
+ * no way to distinguish a proxy-set value from a forged one at this layer.
+ * That's also why there's no default here and no fallback to
+ * X-Forwarded-For or request.ip: an unconfigured or wrongly-configured
+ * deployment should fail safe (rate limiting simply doesn't activate)
+ * rather than trust something spoofable by default.
+ *
+ * Defined before the Fastify instance (below) so the same function can also
+ * back the request logger's remoteAddress field — see logger.serializers.req
+ * there. Its parameter type is structural (just needs a `.headers` object),
+ * not FastifyRequest specifically, since Fastify's req serializer is handed
+ * the raw Node request, not the wrapped one.
+ */
+const TRUSTED_IP_HEADER = (process.env.TRUSTED_IP_HEADER || '').toLowerCase();
+
+function getTrustedClientIp(request: { headers: Record<string, string | string[] | undefined> }): string | undefined {
+  if (!TRUSTED_IP_HEADER) return undefined;
+  const value = request.headers[TRUSTED_IP_HEADER];
+  return typeof value === 'string' ? value : undefined;
+}
+
+/**
  * Initialize the Hono application with strict typing for bindings and variables.
  */
 // trustProxy is intentionally off: nothing in this app reads request.ip (see
-// getTrustedClientIp below), so there is no reason to have Fastify honor a
+// getTrustedClientIp above), so there is no reason to have Fastify honor a
 // client-settable X-Forwarded-For at all.
 //
 // bodyLimit is sized for the worst-case /v1/jobs/push payload this API
@@ -35,7 +67,29 @@ type Variables = {
 // 413 before this file's own validation (and its clearer error messages) ever
 // runs.
 const app = Fastify({
-  logger: true,
+  logger: {
+    // Fastify's default req serializer logs the raw socket's peer address as
+    // remoteAddress — behind a reverse proxy, that's the proxy's own address,
+    // not the real client's, which is exactly the "why does the log show a
+    // Docker IP" surprise this was written to fix. Overridden to log the same
+    // trusted value the app's own rate limiting/IP logging already use
+    // (getTrustedClientIp above), rather than reaching for a second, separate
+    // trust mechanism (trustProxy + X-Forwarded-For) with different
+    // semantics and its own spoofing considerations. Falls back to the raw
+    // socket address when no trusted header is present (e.g. local dev),
+    // matching Fastify's own default behavior for that case.
+    serializers: {
+      req(req) {
+        return {
+          method: req.method,
+          url: req.url,
+          host: req.headers.host,
+          remoteAddress: getTrustedClientIp(req) || req.socket?.remoteAddress,
+          remotePort: req.socket?.remotePort,
+        };
+      },
+    },
+  },
   trustProxy: false,
   bodyLimit: 5 * 1024 * 1024,
   // Fastify's default request id is a plain per-process counter ("req-1",
@@ -97,33 +151,6 @@ app.register(helmet, {
     },
   },
 });
-
-
-/**
- * --- Trusted client IP ---
- * Rate limiting and login IP logging need the real client IP, but this
- * process may be sitting behind a reverse proxy (nginx, Caddy, a tunnel —
- * whatever you've put in front of it) that terminates the actual internet-
- * facing connection. TRUSTED_IP_HEADER names the header *that* proxy sets
- * with the real client IP.
- *
- * This is only safe to trust if your proxy is the *sole* path to this
- * process — see the deployment notes in README.md. If it isn't (e.g. this
- * container's port is also published directly on the host), any client can
- * set this header to whatever it wants and it will be trusted as-is: there's
- * no way to distinguish a proxy-set value from a forged one at this layer.
- * That's also why there's no default here and no fallback to
- * X-Forwarded-For or request.ip: an unconfigured or wrongly-configured
- * deployment should fail safe (rate limiting simply doesn't activate)
- * rather than trust something spoofable by default.
- */
-const TRUSTED_IP_HEADER = (process.env.TRUSTED_IP_HEADER || '').toLowerCase();
-
-function getTrustedClientIp(request: FastifyRequest): string | undefined {
-  if (!TRUSTED_IP_HEADER) return undefined;
-  const value = request.headers[TRUSTED_IP_HEADER];
-  return typeof value === 'string' ? value : undefined;
-}
 
 /**
  * --- Rate Limiting Middleware ---

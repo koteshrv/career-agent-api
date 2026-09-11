@@ -27,7 +27,7 @@ type Variables = {
 // getTrustedClientIp below), so there is no reason to have Fastify honor a
 // client-settable X-Forwarded-For at all.
 //
-// bodyLimit is sized for the worst-case /api/jobs/push payload this API
+// bodyLimit is sized for the worst-case /v1/jobs/push payload this API
 // actually accepts: 1000 jobs (its own hard cap, checked in the handler) at
 // up to ~3.6KB each of validated field content (MAX_FIELD_LENGTH/MAX_URL_LENGTH
 // below) plus JSON overhead, comfortably under 4MB. Fastify's own 1MB default
@@ -192,7 +192,7 @@ const authMiddleware = async (request: FastifyRequest, reply: FastifyReply) => {
 /**
  * --- Admin Authorization Middleware ---
  * Chained after authMiddleware (which must run first — this only reads
- * request.user, it doesn't authenticate on its own). Gates /api/admin/*.
+ * request.user, it doesn't authenticate on its own). Gates /v1/admin/*.
  * There's no self-service way to become an admin; see is_admin in schema.sql.
  */
 const adminMiddleware = async (request: FastifyRequest, reply: FastifyReply) => {
@@ -230,6 +230,15 @@ const FLAGS_TO_BAN_USER = 5;
 const MAX_FIELD_LENGTH = 512;
 const MAX_URL_LENGTH = 2048;
 
+// Jobs older than this are excluded from GET /v1/jobs/pull by default (a
+// client can still opt into seeing them with ?include_stale=true). This is
+// soft, not destructive: the row and its history aren't touched, it's just
+// no longer handed out by default — community reporting (REPORTS_TO_FLAG_JOB
+// above) stays the only thing that actually withdraws a job from the pool.
+// 60 days is a starting point, not a researched number; tune it once real
+// usage shows whether job listings this old are still typically live.
+const PULL_MAX_JOB_AGE_DAYS = 60;
+
 /**
  * A pushed job's URL must be a syntactically real http(s) URL with a hostname
  * containing a dot. This won't stop a determined faker, but it removes the
@@ -250,7 +259,7 @@ const isValidJobUrl = (value: string): boolean => {
 // --- API Routes ---
 
 /**
- * Tighter, dedicated limit for /api/auth/login on top of the blanket global
+ * Tighter, dedicated limit for /v1/auth/login on top of the blanket global
  * one above — it's the highest-value target for credential stuffing /
  * brute-forcing IdP tokens, and 100/60s (fine for the rest of the API) is far
  * too generous for an auth endpoint specifically. 20/60s comfortably covers
@@ -267,13 +276,13 @@ const loginRateLimitMiddleware = async (request: FastifyRequest, reply: FastifyR
 };
 
 /**
- * POST /api/auth/login
+ * POST /v1/auth/login
  * SSO Login Endpoint. In a full production implementation, this endpoint would verify
  * an IdP-issued JWT (e.g., from Microsoft Entra or Google) against public JWKS before
  * issuing the internal API JWT.
  */
-app.post('/api/auth/login', { preHandler: loginRateLimitMiddleware }, async (request, reply) => {
-  // See the equivalent comment in /api/jobs/push: request.body is already
+app.post('/v1/auth/login', { preHandler: loginRateLimitMiddleware }, async (request, reply) => {
+  // See the equivalent comment in /v1/jobs/push: request.body is already
   // parsed by the time this handler runs (malformed JSON is rejected earlier
   // by Fastify itself, via the global error handler). The optional chaining
   // only guards a technically-valid but non-object JSON body from throwing.
@@ -443,7 +452,7 @@ app.post('/api/auth/login', { preHandler: loginRateLimitMiddleware }, async (req
     id: userId,
     email: email, // Required for Local API verification
     // Embeds the token_version this account had at issuance, so a later
-    // POST /api/auth/logout-all (which bumps it) invalidates this token even
+    // POST /v1/auth/logout-all (which bumps it) invalidates this token even
     // though its signature stays valid. New users start at the schema
     // default (0); an existing user's current value came back on the `user`
     // row fetched above.
@@ -463,14 +472,14 @@ app.post('/api/auth/login', { preHandler: loginRateLimitMiddleware }, async (req
 });
 
 /**
- * POST /api/auth/logout-all
+ * POST /v1/auth/logout-all
  * Invalidates every JWT previously issued to this account (including the one
  * used to call this endpoint) by bumping token_version — the auth middleware
  * rejects any token whose embedded `tv` no longer matches. There is no
  * separate single-session logout: JWTs are stateless and not tracked
  * individually, so revocation is necessarily all-or-nothing per account.
  */
-app.post('/api/auth/logout-all', { preHandler: authMiddleware }, async (request, reply) => {
+app.post('/v1/auth/logout-all', { preHandler: authMiddleware }, async (request, reply) => {
   const user = request.user!;
   await DB.prepare('UPDATE users SET token_version = token_version + 1 WHERE id = ?')
     .bind(user.id)
@@ -483,11 +492,11 @@ app.post('/api/auth/logout-all', { preHandler: authMiddleware }, async (request,
  */
 
 /**
- * POST /api/jobs/push
+ * POST /v1/jobs/push
  * Give-to-Get Economy: Users upload scraped jobs here to earn API credits.
  * 1 unique job successfully inserted = 1 credit earned.
  */
-app.post('/api/jobs/push', { preHandler: authMiddleware }, async (request, reply) => {
+app.post('/v1/jobs/push', { preHandler: authMiddleware }, async (request, reply) => {
   const user = request.user!;
   // request.body is already fully parsed by the time this handler runs (a
   // genuinely malformed body never reaches here at all — Fastify's own JSON
@@ -643,11 +652,11 @@ app.post('/api/jobs/push', { preHandler: authMiddleware }, async (request, reply
 });
 
 /**
- * GET /api/jobs/pull
+ * GET /v1/jobs/pull
  * Give-to-Get Economy: Users consume jobs here, spending their API credits.
  * 1 job pulled = 1 credit spent. Falls back to a strict daily free quota if out of credits.
  */
-app.get('/api/jobs/pull', { preHandler: authMiddleware }, async (request, reply) => {
+app.get('/v1/jobs/pull', { preHandler: authMiddleware }, async (request, reply) => {
   const user = request.user!;
   const limitParam = parseInt((request.query as any).limit || '10', 10);
   if (!Number.isFinite(limitParam)) {
@@ -655,6 +664,7 @@ app.get('/api/jobs/pull', { preHandler: authMiddleware }, async (request, reply)
   }
   const limit = Math.min(Math.max(limitParam, 1), 100);
   const today = new Date().toISOString().split('T')[0];
+  const includeStale = (request.query as any).include_stale === 'true';
 
   type Reservation = { want: number; fromCredits: boolean; warningMessage?: string };
   let reservation: Reservation | null = null;
@@ -745,13 +755,17 @@ app.get('/api/jobs/pull', { preHandler: authMiddleware }, async (request, reply)
   // without a client having to spend a follow-up call to find out the pool is
   // empty — trimmed back to what was actually reserved/paid for immediately
   // after, so that lookahead row is never claimed, charged for, or marked seen.
+  // Also excludes jobs older than PULL_MAX_JOB_AGE_DAYS unless the caller
+  // opted in with ?include_stale=true — soft staleness, not a delete: the
+  // rows aren't touched, they're just not handed out by default.
   const candidates = await DB.prepare(
     `SELECT id, company, title, location, url, created_at FROM jobs
      WHERE is_flagged = false
        AND id NOT IN (SELECT job_id FROM pulled_jobs WHERE user_id = ?)
+       AND (? OR created_at >= NOW() - (INTERVAL '1 day' * ?))
      ORDER BY created_at DESC LIMIT ?`
   )
-    .bind(user.id, reservation.want + 1)
+    .bind(user.id, includeStale, PULL_MAX_JOB_AGE_DAYS, reservation.want + 1)
     .all();
 
   const hasMore = candidates.results.length > reservation.want;
@@ -822,7 +836,7 @@ app.get('/api/jobs/pull', { preHandler: authMiddleware }, async (request, reply)
 });
 
 /**
- * POST /api/jobs/report
+ * POST /v1/jobs/report
  * Community quality control: report a job as fake, dead, or spam.
  *
  * Only a user who actually pulled the job may report it, and the (job_id,
@@ -833,9 +847,9 @@ app.get('/api/jobs/pull', { preHandler: authMiddleware }, async (request, reply)
  * earned credit for it is clawed back, and a strike is recorded; at
  * FLAGS_TO_BAN_USER strikes the contributor is auto-banned.
  */
-app.post('/api/jobs/report', { preHandler: authMiddleware }, async (request, reply) => {
+app.post('/v1/jobs/report', { preHandler: authMiddleware }, async (request, reply) => {
   const user = request.user!;
-  // See the equivalent comment in /api/jobs/push above: request.body is
+  // See the equivalent comment in /v1/jobs/push above: request.body is
   // already parsed here, and the optional chaining only guards a
   // technically-valid but non-object JSON body from throwing on destructure.
   const body = request.body as any;
@@ -854,7 +868,7 @@ app.post('/api/jobs/report', { preHandler: authMiddleware }, async (request, rep
   )
     .bind(job_id)
     // scraped_by_user_id is nullable: the contributor may have since deleted
-    // their account (DELETE /api/me detaches the job rather than deleting it
+    // their account (DELETE /v1/me detaches the job rather than deleting it
     // — see migrations/0004_nullable_job_contributor.sql).
     .first<{ id: string; scraped_by_user_id: string | null; is_flagged: boolean }>();
 
@@ -950,10 +964,10 @@ app.post('/api/jobs/report', { preHandler: authMiddleware }, async (request, rep
 });
 
 /**
- * GET /api/me
+ * GET /v1/me
  * Returns the authenticated user's current Give-to-Get economy balance and stats.
  */
-app.get('/api/me', { preHandler: authMiddleware }, async (request, reply) => {
+app.get('/v1/me', { preHandler: authMiddleware }, async (request, reply) => {
   const user = request.user!;
 
   const userData = await DB.prepare(
@@ -994,13 +1008,13 @@ app.get('/api/me', { preHandler: authMiddleware }, async (request, reply) => {
 });
 
 /**
- * GET /api/me/export
+ * GET /v1/me/export
  * Self-service data export: everything this account's own data touches —
  * profile, jobs contributed, jobs pulled, reports filed. Community data other
  * users generated (e.g. reports *against* this account's jobs) isn't this
  * account's own data and isn't included.
  */
-app.get('/api/me/export', { preHandler: authMiddleware }, async (request, reply) => {
+app.get('/v1/me/export', { preHandler: authMiddleware }, async (request, reply) => {
   const user = request.user!;
 
   const profile = await DB.prepare(
@@ -1046,7 +1060,7 @@ app.get('/api/me/export', { preHandler: authMiddleware }, async (request, reply)
 });
 
 /**
- * DELETE /api/me
+ * DELETE /v1/me
  * Self-service account deletion. Erases this account's own row (email, IP,
  * credit/stat history) along with pulled_jobs/job_reports rows that
  * reference it (ON DELETE CASCADE — those are this account's own activity
@@ -1060,7 +1074,7 @@ app.get('/api/me/export', { preHandler: authMiddleware }, async (request, reply)
  * Requires `{"confirm": true}` in the body — a bare DELETE (e.g. an
  * accidental request from a buggy client) does nothing.
  */
-app.delete('/api/me', { preHandler: authMiddleware }, async (request, reply) => {
+app.delete('/v1/me', { preHandler: authMiddleware }, async (request, reply) => {
   const user = request.user!;
   const body = request.body as any;
 
@@ -1084,7 +1098,7 @@ app.delete('/api/me', { preHandler: authMiddleware }, async (request, reply) => 
  */
 const ADMIN_MAX_CREDITS = 1_000_000;
 
-/** Records one row in admin_actions. See GET /api/admin/audit-log. */
+/** Records one row in admin_actions. See GET /v1/admin/audit-log. */
 async function logAdminAction(
   adminId: string,
   action: string,
@@ -1100,7 +1114,7 @@ async function logAdminAction(
 }
 
 app.get(
-  '/api/admin/users',
+  '/v1/admin/users',
   { preHandler: [authMiddleware, adminMiddleware] },
   async (request, reply) => {
     const email = (request.query as any)?.email;
@@ -1121,7 +1135,7 @@ app.get(
 );
 
 app.get(
-  '/api/admin/users/:id',
+  '/v1/admin/users/:id',
   { preHandler: [authMiddleware, adminMiddleware] },
   async (request, reply) => {
     const { id } = request.params as { id: string };
@@ -1140,7 +1154,7 @@ app.get(
 );
 
 app.post(
-  '/api/admin/users/:id/credits',
+  '/v1/admin/users/:id/credits',
   { preHandler: [authMiddleware, adminMiddleware] },
   async (request, reply) => {
     const { id } = request.params as { id: string };
@@ -1169,7 +1183,7 @@ app.post(
 );
 
 app.post(
-  '/api/admin/users/:id/ban',
+  '/v1/admin/users/:id/ban',
   { preHandler: [authMiddleware, adminMiddleware] },
   async (request, reply) => {
     const { id } = request.params as { id: string };
@@ -1185,7 +1199,7 @@ app.post(
 );
 
 app.post(
-  '/api/admin/users/:id/unban',
+  '/v1/admin/users/:id/unban',
   { preHandler: [authMiddleware, adminMiddleware] },
   async (request, reply) => {
     const { id } = request.params as { id: string };
@@ -1201,7 +1215,7 @@ app.post(
 );
 
 app.get(
-  '/api/admin/jobs/flagged',
+  '/v1/admin/jobs/flagged',
   { preHandler: [authMiddleware, adminMiddleware] },
   async (request, reply) => {
     const limitParam = parseInt((request.query as any)?.limit || '50', 10);
@@ -1217,7 +1231,7 @@ app.get(
 );
 
 app.post(
-  '/api/admin/jobs/:id/unflag',
+  '/v1/admin/jobs/:id/unflag',
   { preHandler: [authMiddleware, adminMiddleware] },
   async (request, reply) => {
     const { id } = request.params as { id: string };
@@ -1233,14 +1247,14 @@ app.post(
 );
 
 /**
- * GET /api/admin/jobs/:id/reports
+ * GET /v1/admin/jobs/:id/reports
  * Who reported a job and why — the API equivalent of DATABASE_QUERIES.md's
  * "Analyze Why a Job Was Reported" query. Works for any job, not just
  * already-flagged ones, so a borderline case can be reviewed before it hits
  * the auto-flag threshold.
  */
 app.get(
-  '/api/admin/jobs/:id/reports',
+  '/v1/admin/jobs/:id/reports',
   { preHandler: [authMiddleware, adminMiddleware] },
   async (request, reply) => {
     const { id } = request.params as { id: string };
@@ -1262,11 +1276,11 @@ app.get(
 );
 
 /**
- * GET /api/admin/audit-log
- * Every write made through /api/admin/* — see logAdminAction above.
+ * GET /v1/admin/audit-log
+ * Every write made through /v1/admin/* — see logAdminAction above.
  */
 app.get(
-  '/api/admin/audit-log',
+  '/v1/admin/audit-log',
   { preHandler: [authMiddleware, adminMiddleware] },
   async (request, reply) => {
     const limitParam = parseInt((request.query as any)?.limit || '50', 10);
@@ -1287,12 +1301,12 @@ app.get(
 );
 
 /**
- * GET /api/admin/stats
+ * GET /v1/admin/stats
  * Aggregate system metrics — the API equivalent of DATABASE_QUERIES.md's
  * "Total System Metrics" and "View Top Contributors" queries.
  */
 app.get(
-  '/api/admin/stats',
+  '/v1/admin/stats',
   { preHandler: [authMiddleware, adminMiddleware] },
   async (request, reply) => {
     const [totals, topContributors] = await Promise.all([
@@ -1302,8 +1316,14 @@ app.get(
            (SELECT COUNT(*)::int FROM users WHERE is_banned = true) AS total_banned_users,
            (SELECT COUNT(*)::int FROM jobs) AS total_jobs,
            (SELECT COUNT(*)::int FROM jobs WHERE is_flagged = true) AS total_flagged_jobs,
+           (SELECT COUNT(*)::int FROM jobs
+              WHERE is_flagged = false
+                AND created_at < NOW() - (INTERVAL '1 day' * ?)
+           ) AS total_stale_jobs,
            (SELECT COUNT(*)::int FROM job_reports) AS total_reports`
-      ).first(),
+      )
+        .bind(PULL_MAX_JOB_AGE_DAYS)
+        .first(),
       DB.prepare(
         `SELECT email, total_pushed, current_credits, is_banned
          FROM users ORDER BY total_pushed DESC LIMIT 10`
@@ -1312,6 +1332,23 @@ app.get(
     return reply.send({ ...(totals ?? {}), top_contributors: topContributors.results });
   }
 );
+
+/**
+ * GET /
+ * Unauthenticated root — a bare 404 here isn't a great first impression for
+ * anyone (a contributor, a curious visitor) who just opens the API's domain
+ * in a browser. Stays plain JSON, not HTML/a redirect, to match this being
+ * a pure JSON API throughout (see the CSP default-src 'none' above).
+ */
+app.get('/', async (request, reply) => {
+  return reply.send({
+    name: 'CareerAgent API',
+    version: process.env.GIT_COMMIT_HASH || 'unknown',
+    docs: 'https://github.com/koteshrv/career-agent-api/blob/main/API_REFERENCE.md',
+    repo: 'https://github.com/koteshrv/career-agent-api',
+    health: '/health',
+  });
+});
 
 /**
  * GET /health

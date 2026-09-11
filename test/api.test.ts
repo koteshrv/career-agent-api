@@ -37,21 +37,21 @@ function decodeUserId(token: string): string {
 }
 
 async function push(body: unknown, as: string = token) {
-  return req({ method: 'POST', url: '/api/jobs/push', headers: authHeaders(as), payload: body });
+  return req({ method: 'POST', url: '/v1/jobs/push', headers: authHeaders(as), payload: body });
 }
 
 async function pull(limit: number | string = 10, as: string = token) {
-  return req({ method: 'GET', url: `/api/jobs/pull?limit=${limit}`, headers: authHeaders(as) });
+  return req({ method: 'GET', url: `/v1/jobs/pull?limit=${limit}`, headers: authHeaders(as) });
 }
 
 async function me(as: string = token) {
-  return req({ method: 'GET', url: '/api/me', headers: authHeaders(as) });
+  return req({ method: 'GET', url: '/v1/me', headers: authHeaders(as) });
 }
 
 async function report(jobId: string, as: string = token) {
   return req({
     method: 'POST',
-    url: '/api/jobs/report',
+    url: '/v1/jobs/report',
     headers: authHeaders(as),
     payload: { job_id: jobId, reason: 'fake' },
   });
@@ -61,20 +61,20 @@ async function logoutAll(as: string = token) {
   // Deliberately not authHeaders(): this route takes no body, and sending a
   // Content-Type: application/json with no payload trips Fastify's own
   // empty-JSON-body rejection before the handler ever runs.
-  return req({ method: 'POST', url: '/api/auth/logout-all', headers: { Authorization: `Bearer ${as}` } });
+  return req({ method: 'POST', url: '/v1/auth/logout-all', headers: { Authorization: `Bearer ${as}` } });
 }
 
 async function login(body: unknown) {
   return req({
     method: 'POST',
-    url: '/api/auth/login',
+    url: '/v1/auth/login',
     headers: { 'Content-Type': 'application/json' },
     payload: body,
   });
 }
 
 async function exportMe(as: string = token) {
-  return req({ method: 'GET', url: '/api/me/export', headers: authHeaders(as) });
+  return req({ method: 'GET', url: '/v1/me/export', headers: authHeaders(as) });
 }
 
 // confirm: null means "send no payload at all" — can't default-parameter
@@ -83,7 +83,7 @@ async function exportMe(as: string = token) {
 async function deleteMe(confirm: boolean | null = true, as: string = token) {
   return req({
     method: 'DELETE',
-    url: '/api/me',
+    url: '/v1/me',
     headers: authHeaders(as),
     payload: confirm === null ? undefined : { confirm },
   });
@@ -92,7 +92,7 @@ async function deleteMe(confirm: boolean | null = true, as: string = token) {
 async function adminUsersByEmail(email: string, as: string = token) {
   return req({
     method: 'GET',
-    url: `/api/admin/users?email=${encodeURIComponent(email)}`,
+    url: `/v1/admin/users?email=${encodeURIComponent(email)}`,
     headers: authHeaders(as),
   });
 }
@@ -100,7 +100,7 @@ async function adminUsersByEmail(email: string, as: string = token) {
 async function adminSetCredits(id: string, credits: number, as: string = token) {
   return req({
     method: 'POST',
-    url: `/api/admin/users/${id}/credits`,
+    url: `/v1/admin/users/${id}/credits`,
     headers: authHeaders(as),
     payload: { credits },
   });
@@ -109,31 +109,31 @@ async function adminSetCredits(id: string, credits: number, as: string = token) 
 async function adminBan(id: string, as: string = token) {
   // No body needed — deliberately not authHeaders() to avoid the same
   // empty-JSON-body rejection noted on logout-all above.
-  return req({ method: 'POST', url: `/api/admin/users/${id}/ban`, headers: { Authorization: `Bearer ${as}` } });
+  return req({ method: 'POST', url: `/v1/admin/users/${id}/ban`, headers: { Authorization: `Bearer ${as}` } });
 }
 
 async function adminUnflag(jobId: string, as: string = token) {
   return req({
     method: 'POST',
-    url: `/api/admin/jobs/${jobId}/unflag`,
+    url: `/v1/admin/jobs/${jobId}/unflag`,
     headers: { Authorization: `Bearer ${as}` },
   });
 }
 
 async function adminFlaggedJobs(as: string = token) {
-  return req({ method: 'GET', url: '/api/admin/jobs/flagged', headers: authHeaders(as) });
+  return req({ method: 'GET', url: '/v1/admin/jobs/flagged', headers: authHeaders(as) });
 }
 
 async function adminJobReports(jobId: string, as: string = token) {
-  return req({ method: 'GET', url: `/api/admin/jobs/${jobId}/reports`, headers: authHeaders(as) });
+  return req({ method: 'GET', url: `/v1/admin/jobs/${jobId}/reports`, headers: authHeaders(as) });
 }
 
 async function adminAuditLog(as: string = token) {
-  return req({ method: 'GET', url: '/api/admin/audit-log', headers: authHeaders(as) });
+  return req({ method: 'GET', url: '/v1/admin/audit-log', headers: authHeaders(as) });
 }
 
 async function adminStats(as: string = token) {
-  return req({ method: 'GET', url: '/api/admin/stats', headers: authHeaders(as) });
+  return req({ method: 'GET', url: '/v1/admin/stats', headers: authHeaders(as) });
 }
 
 beforeEach(async () => {
@@ -144,7 +144,7 @@ beforeEach(async () => {
 
 describe('authentication', () => {
   it('rejects a request with no Authorization header', async () => {
-    const res = await req({ method: 'GET', url: '/api/me' });
+    const res = await req({ method: 'GET', url: '/v1/me' });
     expect(res.status).toBe(401);
   });
 
@@ -182,7 +182,7 @@ describe('push validation', () => {
   it('rejects a malformed JSON body with 400, not 500', async () => {
     const res = await req({
       method: 'POST',
-      url: '/api/jobs/push',
+      url: '/v1/jobs/push',
       headers: authHeaders(token),
       payload: '{not json' as any,
     });
@@ -357,6 +357,35 @@ describe('pull economy', () => {
     const ids = bodies.flatMap((b) => (b.jobs ?? []).map((j: any) => j.id));
 
     expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  describe('staleness', () => {
+    async function ageJob(days: number): Promise<string> {
+      await push({ jobs: [job(1)] });
+      const row = await DB.prepare('SELECT id FROM jobs LIMIT 1').first<{ id: string }>();
+      await DB.prepare("UPDATE jobs SET created_at = NOW() - (INTERVAL '1 day' * ?) WHERE id = ?")
+        .bind(days, row!.id)
+        .run();
+      return row!.id;
+    }
+
+    it('excludes jobs older than the cutoff by default', async () => {
+      await ageJob(61);
+      const body = (await (await pull(10)).json()) as any;
+      expect(body.jobs).toHaveLength(0);
+    });
+
+    it('includes stale jobs with ?include_stale=true', async () => {
+      const staleId = await ageJob(61);
+      const body = (await (await req({ method: 'GET', url: '/v1/jobs/pull?limit=10&include_stale=true', headers: authHeaders(token) })).json()) as any;
+      expect(body.jobs.map((j: any) => j.id)).toContain(staleId);
+    });
+
+    it('does not exclude a job just under the cutoff', async () => {
+      await ageJob(59);
+      const body = (await (await pull(10)).json()) as any;
+      expect(body.jobs).toHaveLength(1);
+    });
   });
 });
 
@@ -622,6 +651,16 @@ describe('health', () => {
   });
 });
 
+describe('root', () => {
+  it('returns API metadata unauthenticated, instead of a bare 404', async () => {
+    const res = await req({ method: 'GET', url: '/' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    expect(body.name).toBe('CareerAgent API');
+    expect(body.health).toBe('/health');
+  });
+});
+
 describe('account export and deletion', () => {
   it('exports the profile plus contributed/pulled/reported data', async () => {
     await push({ jobs: [job(1)] });
@@ -687,14 +726,14 @@ describe('account export and deletion', () => {
 });
 
 describe('login rate limiting', () => {
-  it('applies a tighter, separate budget (20/60s) to /api/auth/login than the global limit', async () => {
+  it('applies a tighter, separate budget (20/60s) to /v1/auth/login than the global limit', async () => {
     const ip = '203.0.113.20';
     let lastStatus = 200;
     for (let i = 0; i < 21; i++) {
       lastStatus = (
         await req({
           method: 'POST',
-          url: '/api/auth/login',
+          url: '/v1/auth/login',
           headers: { 'Content-Type': 'application/json', 'x-trusted-client-ip': ip },
           payload: {}, // missing idp_token/sso_provider -> fails validation, never calls out to a real IdP
         })
@@ -752,7 +791,7 @@ describe('admin API', () => {
   });
 
   it('401s admin routes with no token at all', async () => {
-    const res = await req({ method: 'GET', url: '/api/admin/jobs/flagged' });
+    const res = await req({ method: 'GET', url: '/v1/admin/jobs/flagged' });
     expect(res.status).toBe(401);
   });
 
@@ -838,5 +877,17 @@ describe('admin API', () => {
     expect(body.top_contributors.find((c: any) => c.email === 'test@example.com')).toMatchObject({
       total_pushed: 2,
     });
+  });
+
+  it('counts stale jobs separately, without excluding them from total_jobs', async () => {
+    await push({ jobs: [job(1)] });
+    const row = await DB.prepare('SELECT id FROM jobs LIMIT 1').first<{ id: string }>();
+    await DB.prepare("UPDATE jobs SET created_at = NOW() - INTERVAL '90 days' WHERE id = ?")
+      .bind(row!.id)
+      .run();
+
+    const body = (await (await adminStats(adminToken)).json()) as any;
+    expect(body.total_jobs).toBe(1);
+    expect(body.total_stale_jobs).toBe(1);
   });
 });

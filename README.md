@@ -7,7 +7,8 @@
 
 A centralized crowdsourcing API for the open-source [CareerAgent](https://github.com/koteshrv/career-agent) job automation tool — the shared job-sharing network behind it. Built with Node.js, Fastify, PostgreSQL, and Redis.
 
-**API:** [https://api.careeragent.fyi](https://api.careeragent.fyi) · **Docs:** [API_REFERENCE.md](API_REFERENCE.md) · [openapi.yaml](openapi.yaml) · [Postman collection](postman/postman_collection.json)
+**API:** [https://api.careeragent.fyi](https://api.careeragent.fyi)<br>
+**Docs:** [API_REFERENCE.md](API_REFERENCE.md) · [openapi.yaml](openapi.yaml) · [Postman collection](postman/postman_collection.json)
 
 ## Contents
 

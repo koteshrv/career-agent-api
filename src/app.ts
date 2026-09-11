@@ -34,7 +34,20 @@ type Variables = {
 // would otherwise reject a legitimate max-size, max-cap request with a bare
 // 413 before this file's own validation (and its clearer error messages) ever
 // runs.
-const app = Fastify({ logger: true, trustProxy: false, bodyLimit: 5 * 1024 * 1024 });
+const app = Fastify({
+  logger: true,
+  trustProxy: false,
+  bodyLimit: 5 * 1024 * 1024,
+  // Fastify's default request id is a plain per-process counter ("req-1",
+  // "req-2", ...) — fine for correlating a request with its own response
+  // line within one still-running process, but it resets to 1 on every
+  // restart/redeploy, so two unrelated requests across different container
+  // lifetimes can share the same id once logs are aggregated (this app's
+  // error responses also echo request.id back to the client as `requestId`
+  // for support correlation, which makes the collision worse, not just a
+  // log-reading annoyance). A UUID is unique regardless of process history.
+  genReqId: () => crypto.randomUUID(),
+});
 declare module 'fastify' {
   interface FastifyRequest {
     user?: { id: string; email: string; is_admin: boolean; };

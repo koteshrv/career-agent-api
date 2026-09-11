@@ -270,6 +270,15 @@ app.post('/api/auth/login', { preHandler: loginRateLimitMiddleware }, async (req
   if (sso_provider === 'google' && !process.env.GOOGLE_CLIENT_ID) {
     return reply.status(500).send({ error: 'Server misconfiguration: GOOGLE_CLIENT_ID not set' });
   }
+  // Same upfront check as Google above — without it, a missing GitHub secret
+  // fails deep inside the token exchange and surfaces as the generic 401
+  // "Identity Provider verification failed" (indistinguishable from an
+  // actually-invalid code), instead of a clear, debuggable 500.
+  if (sso_provider === 'github' && (!process.env.GITHUB_CLIENT_ID || !process.env.GITHUB_CLIENT_SECRET)) {
+    return reply
+      .status(500)
+      .send({ error: 'Server misconfiguration: GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET not set' });
+  }
 
   let email: string | null = null;
   // The IdP's own stable subject identifier — Google's `sub`, GitHub's numeric
@@ -1057,6 +1066,21 @@ app.delete('/api/me', { preHandler: authMiddleware }, async (request, reply) => 
  */
 const ADMIN_MAX_CREDITS = 1_000_000;
 
+/** Records one row in admin_actions. See GET /api/admin/audit-log. */
+async function logAdminAction(
+  adminId: string,
+  action: string,
+  targetType: 'user' | 'job',
+  targetId: string,
+  details?: string
+): Promise<void> {
+  await DB.prepare(
+    'INSERT INTO admin_actions (id, admin_user_id, action, target_type, target_id, details) VALUES (?, ?, ?, ?, ?, ?)'
+  )
+    .bind(crypto.randomUUID(), adminId, action, targetType, targetId, details ?? null)
+    .run();
+}
+
 app.get(
   '/api/admin/users',
   { preHandler: [authMiddleware, adminMiddleware] },
@@ -1121,6 +1145,7 @@ app.post(
     if (result.meta.changes === 0) {
       return reply.status(404).send({ error: 'User not found' });
     }
+    await logAdminAction(request.user!.id, 'set_credits', 'user', id, `credits=${credits}`);
     return reply.send({ success: true, current_credits: credits });
   }
 );
@@ -1136,6 +1161,7 @@ app.post(
     if (result.meta.changes === 0) {
       return reply.status(404).send({ error: 'User not found' });
     }
+    await logAdminAction(request.user!.id, 'ban', 'user', id);
     return reply.send({ success: true });
   }
 );
@@ -1151,6 +1177,7 @@ app.post(
     if (result.meta.changes === 0) {
       return reply.status(404).send({ error: 'User not found' });
     }
+    await logAdminAction(request.user!.id, 'unban', 'user', id);
     return reply.send({ success: true });
   }
 );
@@ -1182,7 +1209,89 @@ app.post(
     if (result.meta.changes === 0) {
       return reply.status(404).send({ error: 'Job not found' });
     }
+    await logAdminAction(request.user!.id, 'unflag_job', 'job', id);
     return reply.send({ success: true });
+  }
+);
+
+/**
+ * GET /api/admin/jobs/:id/reports
+ * Who reported a job and why — the API equivalent of DATABASE_QUERIES.md's
+ * "Analyze Why a Job Was Reported" query. Works for any job, not just
+ * already-flagged ones, so a borderline case can be reviewed before it hits
+ * the auto-flag threshold.
+ */
+app.get(
+  '/api/admin/jobs/:id/reports',
+  { preHandler: [authMiddleware, adminMiddleware] },
+  async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const job = await DB.prepare('SELECT id FROM jobs WHERE id = ?').bind(id).first();
+    if (!job) {
+      return reply.status(404).send({ error: 'Job not found' });
+    }
+    // A plain JOIN, not LEFT JOIN: job_reports.reporter_user_id is NOT NULL
+    // with ON DELETE CASCADE, so a report row can never outlive its reporter.
+    const reports = await DB.prepare(
+      `SELECT r.reporter_user_id, u.email AS reporter_email, r.reason, r.created_at
+       FROM job_reports r JOIN users u ON u.id = r.reporter_user_id
+       WHERE r.job_id = ? ORDER BY r.created_at ASC`
+    )
+      .bind(id)
+      .all();
+    return reply.send({ job_id: id, reports: reports.results });
+  }
+);
+
+/**
+ * GET /api/admin/audit-log
+ * Every write made through /api/admin/* — see logAdminAction above.
+ */
+app.get(
+  '/api/admin/audit-log',
+  { preHandler: [authMiddleware, adminMiddleware] },
+  async (request, reply) => {
+    const limitParam = parseInt((request.query as any)?.limit || '50', 10);
+    const limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam, 1), 200) : 50;
+    // LEFT JOIN, not a plain JOIN: admin_user_id is ON DELETE SET NULL, so a
+    // past action's row outlives an admin who later deletes their account —
+    // admin_email comes back null for those rather than the row vanishing.
+    const actions = await DB.prepare(
+      `SELECT a.id, a.admin_user_id, u.email AS admin_email, a.action, a.target_type,
+              a.target_id, a.details, a.created_at
+       FROM admin_actions a LEFT JOIN users u ON u.id = a.admin_user_id
+       ORDER BY a.created_at DESC LIMIT ?`
+    )
+      .bind(limit)
+      .all();
+    return reply.send({ actions: actions.results });
+  }
+);
+
+/**
+ * GET /api/admin/stats
+ * Aggregate system metrics — the API equivalent of DATABASE_QUERIES.md's
+ * "Total System Metrics" and "View Top Contributors" queries.
+ */
+app.get(
+  '/api/admin/stats',
+  { preHandler: [authMiddleware, adminMiddleware] },
+  async (request, reply) => {
+    const [totals, topContributors] = await Promise.all([
+      DB.prepare(
+        `SELECT
+           (SELECT COUNT(*)::int FROM users) AS total_users,
+           (SELECT COUNT(*)::int FROM users WHERE is_banned = true) AS total_banned_users,
+           (SELECT COUNT(*)::int FROM jobs) AS total_jobs,
+           (SELECT COUNT(*)::int FROM jobs WHERE is_flagged = true) AS total_flagged_jobs,
+           (SELECT COUNT(*)::int FROM job_reports) AS total_reports`
+      ).first(),
+      DB.prepare(
+        `SELECT email, total_pushed, current_credits, is_banned
+         FROM users ORDER BY total_pushed DESC LIMIT 10`
+      ).all(),
+    ]);
+    return reply.send({ ...(totals ?? {}), top_contributors: topContributors.results });
   }
 );
 

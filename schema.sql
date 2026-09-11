@@ -78,3 +78,22 @@ CREATE TABLE job_reports (
 );
 
 CREATE INDEX idx_job_reports_job ON job_reports(job_id);
+
+-- Records every write made through /api/admin/*, so with more than one admin
+-- account there's a real answer to "who banned this user" / "who changed
+-- this credit balance." admin_user_id is ON DELETE SET NULL (not CASCADE),
+-- same reasoning as jobs.scraped_by_user_id: deleting an admin's account
+-- must not erase the history of what they did.
+CREATE TABLE admin_actions (
+    id UUID PRIMARY KEY,
+    admin_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    action TEXT NOT NULL,
+    -- 'user' or 'job'. target_id isn't a foreign key: it can point into
+    -- either table depending on target_type, so it's left unenforced.
+    target_type TEXT NOT NULL,
+    target_id UUID,
+    details TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_admin_actions_created ON admin_actions(created_at DESC);

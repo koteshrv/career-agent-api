@@ -124,6 +124,18 @@ async function adminFlaggedJobs(as: string = token) {
   return req({ method: 'GET', url: '/api/admin/jobs/flagged', headers: authHeaders(as) });
 }
 
+async function adminJobReports(jobId: string, as: string = token) {
+  return req({ method: 'GET', url: `/api/admin/jobs/${jobId}/reports`, headers: authHeaders(as) });
+}
+
+async function adminAuditLog(as: string = token) {
+  return req({ method: 'GET', url: '/api/admin/audit-log', headers: authHeaders(as) });
+}
+
+async function adminStats(as: string = token) {
+  return req({ method: 'GET', url: '/api/admin/stats', headers: authHeaders(as) });
+}
+
 beforeEach(async () => {
   await resetDatabase();
   await createUser(TEST_USER_ID, 'test@example.com', 100);
@@ -534,6 +546,18 @@ describe('SSO identity', () => {
     expect(row?.provider_user_id).toBe('google-sub-legacy');
     expect(row?.current_credits).toBe(77);
   });
+
+  it('fails fast with 500 on a missing GitHub secret, matching the existing Google check', async () => {
+    const savedSecret = process.env.GITHUB_CLIENT_SECRET;
+    delete process.env.GITHUB_CLIENT_SECRET;
+    try {
+      const res = await login({ idp_token: 'code', sso_provider: 'github' });
+      expect(res.status).toBe(500);
+      expect(((await res.json()) as any).error).toMatch(/GITHUB_CLIENT/);
+    } finally {
+      process.env.GITHUB_CLIENT_SECRET = savedSecret;
+    }
+  });
 });
 
 describe('logout-all', () => {
@@ -777,5 +801,42 @@ describe('admin API', () => {
 
     const stillListed = (await (await adminFlaggedJobs(adminToken)).json()) as any;
     expect(stillListed.jobs.map((j: any) => j.id)).not.toContain(jobId);
+  });
+
+  it('records who reported a job and why', async () => {
+    await push({ jobs: [job(1)] });
+    const jobId = ((await (await pull(1)).json()) as any).jobs[0].id;
+    await report(jobId); // TEST_USER_ID, reason: 'fake' (see the report() helper)
+
+    const body = (await (await adminJobReports(jobId, adminToken)).json()) as any;
+    expect(body.reports).toHaveLength(1);
+    expect(body.reports[0]).toMatchObject({ reporter_user_id: TEST_USER_ID, reason: 'fake' });
+  });
+
+  it('404s job-reports for an unknown job', async () => {
+    expect((await adminJobReports('11111111-2222-3333-4444-555555555555', adminToken)).status).toBe(404);
+  });
+
+  it('logs every admin write to the audit log, attributed to the acting admin', async () => {
+    await adminSetCredits(TEST_USER_ID, 500, adminToken);
+    await adminBan(TEST_USER_ID, adminToken);
+
+    const body = (await (await adminAuditLog(adminToken)).json()) as any;
+    const actions = body.actions.map((a: any) => a.action);
+    expect(actions).toContain('set_credits');
+    expect(actions).toContain('ban');
+    expect(body.actions.every((a: any) => a.admin_email === 'admin@example.com')).toBe(true);
+  });
+
+  it('reports aggregate stats', async () => {
+    await push({ jobs: [job(1), job(2)] });
+
+    const body = (await (await adminStats(adminToken)).json()) as any;
+    // TEST_USER_ID + ADMIN_ID from beforeEach.
+    expect(body.total_users).toBe(2);
+    expect(body.total_jobs).toBe(2);
+    expect(body.top_contributors.find((c: any) => c.email === 'test@example.com')).toMatchObject({
+      total_pushed: 2,
+    });
   });
 });

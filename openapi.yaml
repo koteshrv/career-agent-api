@@ -108,6 +108,10 @@ paths:
           description: Missing parameters or failed to extract email/account id from IdP.
         '401':
           description: Invalid IdP token or GitHub code exchange failed.
+        '429':
+          description: Too Many Requests (rate limited — a tighter 20/60s budget applies to this route specifically)
+        '500':
+          description: Server misconfiguration (GOOGLE_CLIENT_ID, or GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET, not set for the requested provider)
 
   /api/auth/logout-all:
     post:
@@ -524,6 +528,59 @@ paths:
           description: Unauthorized (Missing or Invalid JWT)
         '404':
           description: Not an admin account, or job not found
+
+  /api/admin/jobs/{id}/reports:
+    get:
+      summary: "[Admin] Who Reported a Job, and Why"
+      description: >
+        Works for any job, not just already-flagged ones, so a borderline case can be reviewed
+        before it hits the auto-flag threshold.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Reports for this job (possibly empty)
+        '401':
+          description: Unauthorized (Missing or Invalid JWT)
+        '404':
+          description: Not an admin account, or job not found
+
+  /api/admin/audit-log:
+    get:
+      summary: "[Admin] Audit Log"
+      description: Every write made through /api/admin/* — who did what, when.
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 200
+      responses:
+        '200':
+          description: Recent admin actions, newest first
+        '401':
+          description: Unauthorized (Missing or Invalid JWT)
+        '404':
+          description: Not an admin account
+
+  /api/admin/stats:
+    get:
+      summary: "[Admin] Aggregate System Metrics"
+      description: Total users/jobs/reports/flags, plus the top 10 contributors by jobs pushed.
+      responses:
+        '200':
+          description: Aggregate stats
+        '401':
+          description: Unauthorized (Missing or Invalid JWT)
+        '404':
+          description: Not an admin account
 
   /health:
     get:

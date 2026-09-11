@@ -30,6 +30,9 @@ Accounts are identified by `(sso_provider, provider_user_id)` — the IdP's own 
 | `POST /api/admin/users/:id/ban` \| `/unban` | 🔒👑 | Ban/unban an account |
 | `GET /api/admin/jobs/flagged` | 🔒👑 | List withdrawn jobs |
 | `POST /api/admin/jobs/:id/unflag` | 🔒👑 | Restore a job to circulation |
+| `GET /api/admin/jobs/:id/reports` | 🔒👑 | Who reported a job, and why |
+| `GET /api/admin/audit-log` | 🔒👑 | Every admin write, who did it |
+| `GET /api/admin/stats` | 🔒👑 | Aggregate system metrics |
 | `GET /health` | — | Liveness probe |
 
 🔒 = requires a JWT · 👑 = requires `is_admin` on that account (see [Bootstrapping an Admin](#bootstrapping-an-admin) below)
@@ -72,6 +75,7 @@ cat migrations/0001_provider_scoped_identity.sql | docker exec -i $(docker compo
 cat migrations/0002_token_version.sql | docker exec -i $(docker compose ps -q postgres) psql -U careeragent -d careeragent
 cat migrations/0003_admin_role.sql | docker exec -i $(docker compose ps -q postgres) psql -U careeragent -d careeragent
 cat migrations/0004_nullable_job_contributor.sql | docker exec -i $(docker compose ps -q postgres) psql -U careeragent -d careeragent
+cat migrations/0005_admin_audit_log.sql | docker exec -i $(docker compose ps -q postgres) psql -U careeragent -d careeragent
 ```
 Each migration documents what it changes and why in its own header comment, and is safe to run more than once (every statement is guarded).
 

@@ -55,6 +55,9 @@ Either limit returns:
 - [`POST /api/admin/users/:id/unban`](#post-apiadminusersidunban-) 🔒
 - [`GET /api/admin/jobs/flagged`](#get-apiadminjobsflagged-) 🔒
 - [`POST /api/admin/jobs/:id/unflag`](#post-apiadminjobsidunflag-) 🔒
+- [`GET /api/admin/jobs/:id/reports`](#get-apiadminjobsidreports-) 🔒
+- [`GET /api/admin/audit-log`](#get-apiadminaudit-log-) 🔒
+- [`GET /api/admin/stats`](#get-apiadminstats-) 🔒
 
 **System**
 - [`GET /health`](#get-health)
@@ -105,7 +108,7 @@ Exchanges a Google ID token or GitHub OAuth code for an internal API JWT. No aut
 
 **429**: rate limited (see Conventions above).
 
-**500**: `{ "error": "Server misconfiguration: GOOGLE_CLIENT_ID not set" }` — only when `sso_provider: "google"` and the server's env var is missing.
+**500**: `{ "error": "Server misconfiguration: GOOGLE_CLIENT_ID not set" }` (for `sso_provider: "google"`) or `{ "error": "Server misconfiguration: GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET not set" }` (for `"github"`) — checked upfront before calling out to the IdP at all, so a missing secret fails clearly instead of surfacing as the generic 401 above.
 
 ---
 
@@ -456,6 +459,81 @@ Restores a job to circulation — e.g. after review finds a report was a false p
 **200**: `{ "success": true }`
 
 **404**: `{ "error": "Job not found" }`
+
+---
+
+## `GET /api/admin/jobs/:id/reports` 🔒
+
+Who reported a job, and why. Works for **any** job, not just already-flagged ones — useful for reviewing a borderline case before it crosses the auto-flag threshold.
+
+### Response
+
+**200**:
+```json
+{
+  "job_id": "uuid",
+  "reports": [
+    { "reporter_user_id": "uuid", "reporter_email": "someone@example.com", "reason": "dead_link", "created_at": "..." }
+  ]
+}
+```
+`reports: []` if the job has none.
+
+**404**: `{ "error": "Job not found" }`
+
+---
+
+## `GET /api/admin/audit-log` 🔒
+
+Every write made through `/api/admin/*` — `set_credits`, `ban`, `unban`, `unflag_job` — newest first.
+
+### Request
+
+Query parameter `limit` (optional, default 50, clamped to 1–200).
+
+### Response
+
+**200**:
+```json
+{
+  "actions": [
+    {
+      "id": "uuid",
+      "admin_user_id": "uuid or null",
+      "admin_email": "admin@example.com or null",
+      "action": "set_credits",
+      "target_type": "user",
+      "target_id": "uuid",
+      "details": "credits=50000",
+      "created_at": "..."
+    }
+  ]
+}
+```
+`admin_user_id`/`admin_email` are `null` for an action taken by an admin whose account has since been deleted — the log entry itself is never deleted (`admin_user_id` is `ON DELETE SET NULL`, not cascade).
+
+---
+
+## `GET /api/admin/stats` 🔒
+
+Aggregate system metrics — the API equivalent of `DATABASE_QUERIES.md`'s "Total System Metrics" and "View Top Contributors" queries.
+
+### Response
+
+**200**:
+```json
+{
+  "total_users": 142,
+  "total_banned_users": 3,
+  "total_jobs": 8901,
+  "total_flagged_jobs": 12,
+  "total_reports": 40,
+  "top_contributors": [
+    { "email": "someone@example.com", "total_pushed": 512, "current_credits": 87, "is_banned": false }
+  ]
+}
+```
+`top_contributors` is the top 10 accounts by `total_pushed`, descending.
 
 ---
 

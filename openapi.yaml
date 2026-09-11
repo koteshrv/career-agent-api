@@ -4,8 +4,8 @@ info:
   description: A centralized crowdsourcing API for an open-source job scraping tool featuring a Give-to-Get credit economy.
   version: 1.0.0
 servers:
-  - url: https://career-agent-api.example.com
-    description: Production Server (behind your Cloudflare Tunnel hostname)
+  - url: https://api.careeragent.fyi
+    description: Live community instance
   - url: http://localhost:3000
     description: Local Development Server
 
@@ -108,6 +108,10 @@ paths:
           description: Missing parameters or failed to extract email/account id from IdP.
         '401':
           description: Invalid IdP token or GitHub code exchange failed.
+        '429':
+          description: Too Many Requests (rate limited — a tighter 20/60s budget applies to this route specifically)
+        '500':
+          description: Server misconfiguration (GOOGLE_CLIENT_ID, or GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET, not set for the requested provider)
 
   /api/auth/logout-all:
     post:
@@ -234,6 +238,13 @@ paths:
                   quota_used:
                     type: integer
                     description: Number of free quota jobs used if user has 0 credits.
+                  has_more:
+                    type: boolean
+                    description: >
+                      Whether at least one more unconsumed, unflagged job existed beyond this batch at
+                      query time — a hint for whether it's worth calling again, not a hard guarantee (the
+                      pool is shared and can shift between requests). Not a cursor: calling pull() again
+                      already advances through the corpus for free, since already-pulled jobs are excluded.
         '401':
           description: Unauthorized (Missing or Invalid JWT)
         '403':
@@ -273,6 +284,47 @@ paths:
                   flagged_count:
                     type: integer
                     description: Number of this user's contributed jobs the community has flagged as fake or dead.
+        '401':
+          description: Unauthorized (Missing or Invalid JWT)
+
+  /api/me/export:
+    get:
+      summary: Export Account Data
+      description: >
+        Self-service data export: this account's own profile, jobs it contributed, jobs it pulled,
+        and reports it filed. Does not include community data other users generated (e.g. reports
+        filed against this account's jobs by other users).
+      responses:
+        '200':
+          description: Export retrieved
+        '401':
+          description: Unauthorized (Missing or Invalid JWT)
+
+  /api/me:
+    delete:
+      summary: Delete Account
+      description: >
+        Self-service account deletion. Erases this account's own row (email, IP, credit/stat
+        history) and its own activity records (jobs pulled, reports filed). Jobs this account
+        contributed are NOT deleted — they're a shared resource other users may already rely on;
+        attribution is detached instead (`scraped_by_user_id` becomes null). Immediately invalidates
+        every JWT for the account.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties:
+                confirm:
+                  type: boolean
+                  description: Must be `true` — a bare DELETE with no body is rejected, to guard against an accidental call.
+      responses:
+        '200':
+          description: Account deleted
+        '400':
+          description: Missing confirm:true
         '401':
           description: Unauthorized (Missing or Invalid JWT)
 
@@ -331,10 +383,209 @@ paths:
         '404':
           description: Job not found
 
+  /api/admin/users:
+    get:
+      summary: "[Admin] Look Up Users By Email"
+      description: >
+        Requires an admin account (no self-service way to become one — see DATABASE_QUERIES.md).
+        A non-admin gets 404, not 403, so these routes can't be distinguished from a typo'd path.
+        Email is not unique (see the SSO identity model note above), so this can return more than
+        one account.
+      parameters:
+        - in: query
+          name: email
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Matching accounts (possibly empty)
+        '401':
+          description: Unauthorized (Missing or Invalid JWT)
+        '404':
+          description: Not an admin account
+
+  /api/admin/users/{id}:
+    get:
+      summary: "[Admin] Get User"
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Account found
+        '401':
+          description: Unauthorized (Missing or Invalid JWT)
+        '404':
+          description: Not an admin account, or user not found
+
+  /api/admin/users/{id}/credits:
+    post:
+      summary: "[Admin] Set Credit Balance"
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [credits]
+              properties:
+                credits:
+                  type: integer
+                  minimum: 0
+                  description: Sets the absolute balance (not a delta).
+      responses:
+        '200':
+          description: Balance set
+        '400':
+          description: credits out of range
+        '401':
+          description: Unauthorized (Missing or Invalid JWT)
+        '404':
+          description: Not an admin account, or user not found
+
+  /api/admin/users/{id}/ban:
+    post:
+      summary: "[Admin] Ban User"
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: User banned
+        '401':
+          description: Unauthorized (Missing or Invalid JWT)
+        '404':
+          description: Not an admin account, or user not found
+
+  /api/admin/users/{id}/unban:
+    post:
+      summary: "[Admin] Unban User"
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: User unbanned
+        '401':
+          description: Unauthorized (Missing or Invalid JWT)
+        '404':
+          description: Not an admin account, or user not found
+
+  /api/admin/jobs/flagged:
+    get:
+      summary: "[Admin] List Flagged Jobs"
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 200
+      responses:
+        '200':
+          description: Flagged jobs
+        '401':
+          description: Unauthorized (Missing or Invalid JWT)
+        '404':
+          description: Not an admin account
+
+  /api/admin/jobs/{id}/unflag:
+    post:
+      summary: "[Admin] Un-flag a Job"
+      description: Restores a job to circulation, e.g. after review finds a report was a false positive.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Job un-flagged
+        '401':
+          description: Unauthorized (Missing or Invalid JWT)
+        '404':
+          description: Not an admin account, or job not found
+
+  /api/admin/jobs/{id}/reports:
+    get:
+      summary: "[Admin] Who Reported a Job, and Why"
+      description: >
+        Works for any job, not just already-flagged ones, so a borderline case can be reviewed
+        before it hits the auto-flag threshold.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Reports for this job (possibly empty)
+        '401':
+          description: Unauthorized (Missing or Invalid JWT)
+        '404':
+          description: Not an admin account, or job not found
+
+  /api/admin/audit-log:
+    get:
+      summary: "[Admin] Audit Log"
+      description: Every write made through /api/admin/* — who did what, when.
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 200
+      responses:
+        '200':
+          description: Recent admin actions, newest first
+        '401':
+          description: Unauthorized (Missing or Invalid JWT)
+        '404':
+          description: Not an admin account
+
+  /api/admin/stats:
+    get:
+      summary: "[Admin] Aggregate System Metrics"
+      description: Total users/jobs/reports/flags, plus the top 10 contributors by jobs pushed.
+      responses:
+        '200':
+          description: Aggregate stats
+        '401':
+          description: Unauthorized (Missing or Invalid JWT)
+        '404':
+          description: Not an admin account
+
   /health:
     get:
       summary: Health Check
-      description: Unauthenticated liveness probe; also verifies the D1 binding responds.
+      description: Unauthenticated liveness probe; also verifies the database connection.
       security: []
       responses:
         '200':

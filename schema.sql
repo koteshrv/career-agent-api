@@ -23,6 +23,11 @@ CREATE TABLE users (
     last_push_date DATE,
     flagged_count INTEGER DEFAULT 0,
     is_banned BOOLEAN DEFAULT FALSE,
+    -- Grants access to the /api/admin/* routes. No self-service way to set
+    -- this — the first admin is always bootstrapped by hand
+    -- (see DATABASE_QUERIES.md), same as ban/credit changes were before the
+    -- admin API existed.
+    is_admin BOOLEAN NOT NULL DEFAULT FALSE,
     -- Bumped by POST /api/auth/logout-all to invalidate every JWT issued
     -- before that point (each token embeds the version it was signed with;
     -- the auth middleware rejects a mismatch even though the signature is
@@ -45,7 +50,12 @@ CREATE TABLE jobs (
     title TEXT NOT NULL,
     location TEXT,
     url TEXT UNIQUE NOT NULL,
-    scraped_by_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    -- Nullable, ON DELETE SET NULL rather than CASCADE: jobs are a shared
+    -- community resource that other users may already rely on. Deleting a
+    -- contributor's account (DELETE /api/me) must not delete every job they
+    -- ever pushed out from under everyone else — it detaches attribution
+    -- instead. Only this row's own account is actually erased.
+    scraped_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
     is_flagged BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -68,3 +78,22 @@ CREATE TABLE job_reports (
 );
 
 CREATE INDEX idx_job_reports_job ON job_reports(job_id);
+
+-- Records every write made through /api/admin/*, so with more than one admin
+-- account there's a real answer to "who banned this user" / "who changed
+-- this credit balance." admin_user_id is ON DELETE SET NULL (not CASCADE),
+-- same reasoning as jobs.scraped_by_user_id: deleting an admin's account
+-- must not erase the history of what they did.
+CREATE TABLE admin_actions (
+    id UUID PRIMARY KEY,
+    admin_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    action TEXT NOT NULL,
+    -- 'user' or 'job'. target_id isn't a foreign key: it can point into
+    -- either table depending on target_type, so it's left unenforced.
+    target_type TEXT NOT NULL,
+    target_id UUID,
+    details TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_admin_actions_created ON admin_actions(created_at DESC);

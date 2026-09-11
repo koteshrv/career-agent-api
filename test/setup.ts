@@ -23,6 +23,10 @@ process.env.ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || 'http://localhost:517
 process.env.GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || 'test-google-client-id';
 process.env.GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || 'test-github-client-id';
 process.env.GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || 'test-github-client-secret';
+// Arbitrary header name — the point of TRUSTED_IP_HEADER being configurable
+// is that it isn't tied to any specific proxy/vendor, so the tests don't
+// exercise a real one either. See getTrustedClientIp in src/app.ts.
+process.env.TRUSTED_IP_HEADER = process.env.TRUSTED_IP_HEADER || 'x-trusted-client-ip';
 
 // A real RS256 keypair, generated fresh per test run — nothing about it needs
 // to be stable across runs, it just has to match what the app verifies with.

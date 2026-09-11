@@ -73,6 +73,69 @@ async function login(body: unknown) {
   });
 }
 
+async function exportMe(as: string = token) {
+  return req({ method: 'GET', url: '/api/me/export', headers: authHeaders(as) });
+}
+
+// confirm: null means "send no payload at all" — can't default-parameter
+// this to omit-on-undefined, since JS replaces an explicitly-passed
+// `undefined` with the default too, only `null` survives.
+async function deleteMe(confirm: boolean | null = true, as: string = token) {
+  return req({
+    method: 'DELETE',
+    url: '/api/me',
+    headers: authHeaders(as),
+    payload: confirm === null ? undefined : { confirm },
+  });
+}
+
+async function adminUsersByEmail(email: string, as: string = token) {
+  return req({
+    method: 'GET',
+    url: `/api/admin/users?email=${encodeURIComponent(email)}`,
+    headers: authHeaders(as),
+  });
+}
+
+async function adminSetCredits(id: string, credits: number, as: string = token) {
+  return req({
+    method: 'POST',
+    url: `/api/admin/users/${id}/credits`,
+    headers: authHeaders(as),
+    payload: { credits },
+  });
+}
+
+async function adminBan(id: string, as: string = token) {
+  // No body needed — deliberately not authHeaders() to avoid the same
+  // empty-JSON-body rejection noted on logout-all above.
+  return req({ method: 'POST', url: `/api/admin/users/${id}/ban`, headers: { Authorization: `Bearer ${as}` } });
+}
+
+async function adminUnflag(jobId: string, as: string = token) {
+  return req({
+    method: 'POST',
+    url: `/api/admin/jobs/${jobId}/unflag`,
+    headers: { Authorization: `Bearer ${as}` },
+  });
+}
+
+async function adminFlaggedJobs(as: string = token) {
+  return req({ method: 'GET', url: '/api/admin/jobs/flagged', headers: authHeaders(as) });
+}
+
+async function adminJobReports(jobId: string, as: string = token) {
+  return req({ method: 'GET', url: `/api/admin/jobs/${jobId}/reports`, headers: authHeaders(as) });
+}
+
+async function adminAuditLog(as: string = token) {
+  return req({ method: 'GET', url: '/api/admin/audit-log', headers: authHeaders(as) });
+}
+
+async function adminStats(as: string = token) {
+  return req({ method: 'GET', url: '/api/admin/stats', headers: authHeaders(as) });
+}
+
 beforeEach(async () => {
   await resetDatabase();
   await createUser(TEST_USER_ID, 'test@example.com', 100);
@@ -268,6 +331,7 @@ describe('pull economy', () => {
       .run();
 
     const res = await pull(1);
+    expect(res.status).toBe(403);
     const body = (await res.json()) as any;
     expect(body.error).toMatch(/quota/i);
   });
@@ -482,6 +546,18 @@ describe('SSO identity', () => {
     expect(row?.provider_user_id).toBe('google-sub-legacy');
     expect(row?.current_credits).toBe(77);
   });
+
+  it('fails fast with 500 on a missing GitHub secret, matching the existing Google check', async () => {
+    const savedSecret = process.env.GITHUB_CLIENT_SECRET;
+    delete process.env.GITHUB_CLIENT_SECRET;
+    try {
+      const res = await login({ idp_token: 'code', sso_provider: 'github' });
+      expect(res.status).toBe(500);
+      expect(((await res.json()) as any).error).toMatch(/GITHUB_CLIENT/);
+    } finally {
+      process.env.GITHUB_CLIENT_SECRET = savedSecret;
+    }
+  });
 });
 
 describe('logout-all', () => {
@@ -507,13 +583,13 @@ describe('rate limiting', () => {
     const ip = '203.0.113.7';
     let lastStatus = 200;
     for (let i = 0; i < 101; i++) {
-      lastStatus = (await req({ method: 'GET', url: '/health', headers: { 'cf-connecting-ip': ip } })).status;
+      lastStatus = (await req({ method: 'GET', url: '/health', headers: { 'x-trusted-client-ip': ip } })).status;
       if (lastStatus === 429) break;
     }
     expect(lastStatus).toBe(429);
   });
 
-  it('is not applied when cf-connecting-ip is absent', async () => {
+  it('is not applied when the trusted IP header is absent', async () => {
     let sawLimit = false;
     for (let i = 0; i < 105; i++) {
       if ((await req({ method: 'GET', url: '/health' })).status === 429) {
@@ -524,15 +600,15 @@ describe('rate limiting', () => {
     expect(sawLimit).toBe(false);
   });
 
-  it('cannot be bypassed by spoofing x-forwarded-for once cf-connecting-ip is limited', async () => {
+  it('cannot be bypassed by spoofing x-forwarded-for once the trusted IP header is limited', async () => {
     const ip = '203.0.113.9';
     for (let i = 0; i < 101; i++) {
-      await req({ method: 'GET', url: '/health', headers: { 'cf-connecting-ip': ip } });
+      await req({ method: 'GET', url: '/health', headers: { 'x-trusted-client-ip': ip } });
     }
     const res = await req({
       method: 'GET',
       url: '/health',
-      headers: { 'cf-connecting-ip': ip, 'x-forwarded-for': '1.2.3.4' },
+      headers: { 'x-trusted-client-ip': ip, 'x-forwarded-for': '1.2.3.4' },
     });
     expect(res.status).toBe(429);
   });
@@ -543,5 +619,224 @@ describe('health', () => {
     const res = await req({ method: 'GET', url: '/health' });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ status: 'ok', database: 'ok' });
+  });
+});
+
+describe('account export and deletion', () => {
+  it('exports the profile plus contributed/pulled/reported data', async () => {
+    await push({ jobs: [job(1)] });
+    const jobId = ((await (await pull(1)).json()) as any).jobs[0].id;
+    await report(jobId);
+
+    const body = (await (await exportMe()).json()) as any;
+    expect(body.profile.id).toBe(TEST_USER_ID);
+    expect(body.jobs_contributed).toHaveLength(1);
+    expect(body.jobs_pulled).toHaveLength(1);
+    expect(body.reports_filed).toHaveLength(1);
+  });
+
+  it('refuses to delete without explicit confirmation', async () => {
+    expect((await deleteMe(null)).status).toBe(400);
+    expect((await me()).status).toBe(200); // account still exists
+  });
+
+  it('deletes the account and invalidates its tokens', async () => {
+    expect((await deleteMe()).status).toBe(200);
+    expect((await me()).status).toBe(401);
+
+    const row = await DB.prepare('SELECT id FROM users WHERE id = ?').bind(TEST_USER_ID).first();
+    expect(row).toBeNull();
+  });
+
+  it('detaches (does not delete) jobs the account contributed', async () => {
+    await push({ jobs: [job(1)] });
+    const stored = await DB.prepare('SELECT id FROM jobs LIMIT 1').first<{ id: string }>();
+
+    await deleteMe();
+
+    const job2 = await DB.prepare('SELECT scraped_by_user_id FROM jobs WHERE id = ?')
+      .bind(stored!.id)
+      .first<{ scraped_by_user_id: string | null }>();
+    expect(job2).not.toBeNull();
+    expect(job2?.scraped_by_user_id).toBeNull();
+  });
+
+  it('still lets a job whose contributor deleted their account be reported to a flag (no crash)', async () => {
+    await push({ jobs: [job(1)] });
+    const jobId = ((await (await pull(1)).json()) as any).jobs[0].id;
+
+    // The contributor (TEST_USER_ID, also the puller here) deletes their
+    // account after pulling but before anyone reports.
+    await deleteMe();
+
+    // Three fresh users report the now-orphaned job.
+    for (let i = 0; i < 3; i++) {
+      const id = `7777777${i}-7777-7777-7777-777777777777`;
+      await createUser(id, `orphan-reporter${i}@example.com`, 100);
+      const t = tokenFor(id);
+      await pull(1, t);
+      const res = await report(jobId, t);
+      expect(res.status).toBe(200);
+    }
+
+    const flagged = await DB.prepare('SELECT is_flagged FROM jobs WHERE id = ?')
+      .bind(jobId)
+      .first<{ is_flagged: boolean }>();
+    expect(flagged?.is_flagged).toBe(true);
+  });
+});
+
+describe('login rate limiting', () => {
+  it('applies a tighter, separate budget (20/60s) to /api/auth/login than the global limit', async () => {
+    const ip = '203.0.113.20';
+    let lastStatus = 200;
+    for (let i = 0; i < 21; i++) {
+      lastStatus = (
+        await req({
+          method: 'POST',
+          url: '/api/auth/login',
+          headers: { 'Content-Type': 'application/json', 'x-trusted-client-ip': ip },
+          payload: {}, // missing idp_token/sso_provider -> fails validation, never calls out to a real IdP
+        })
+      ).status;
+      if (lastStatus === 429) break;
+    }
+    expect(lastStatus).toBe(429);
+
+    // The global 100/60s budget for this same IP is untouched by the login
+    // limiter hitting its own separate bucket.
+    const other = await req({ method: 'GET', url: '/health', headers: { 'x-trusted-client-ip': ip } });
+    expect(other.status).toBe(200);
+  });
+});
+
+describe('pull pagination', () => {
+  it('reports has_more when more unconsumed jobs remain beyond the batch', async () => {
+    await push({ jobs: Array.from({ length: 5 }, (_, i) => job(i)) });
+    const body = (await (await pull(2)).json()) as any;
+    expect(body.jobs).toHaveLength(2);
+    expect(body.has_more).toBe(true);
+  });
+
+  it('reports has_more: false once the pool is fully drained, without charging for the lookahead row', async () => {
+    await push({ jobs: Array.from({ length: 3 }, (_, i) => job(i)) });
+    const before = ((await (await me()).json()) as any).current_credits;
+
+    const body = (await (await pull(3)).json()) as any;
+    expect(body.jobs).toHaveLength(3);
+    expect(body.has_more).toBe(false);
+    expect(body.deducted).toBe(3); // not 4 — the lookahead job was never claimed/charged
+
+    const after = ((await (await me()).json()) as any).current_credits;
+    expect(after).toBe(before - 3);
+
+    const pulledCount = await DB.prepare('SELECT COUNT(*)::int AS n FROM pulled_jobs WHERE user_id = ?')
+      .bind(TEST_USER_ID)
+      .first<{ n: number }>();
+    expect(pulledCount?.n).toBe(3);
+  });
+});
+
+describe('admin API', () => {
+  const ADMIN_ID = '88888888-8888-8888-8888-888888888888';
+  let adminToken: string;
+
+  beforeEach(async () => {
+    await createUser(ADMIN_ID, 'admin@example.com', 0, { is_admin: true });
+    adminToken = tokenFor(ADMIN_ID);
+  });
+
+  it('404s admin routes for a logged-in non-admin (not 403 — indistinguishable from a typo)', async () => {
+    const res = await adminFlaggedJobs(token); // token = TEST_USER_ID, not admin
+    expect(res.status).toBe(404);
+  });
+
+  it('401s admin routes with no token at all', async () => {
+    const res = await req({ method: 'GET', url: '/api/admin/jobs/flagged' });
+    expect(res.status).toBe(401);
+  });
+
+  it('looks up accounts by email, including more than one for a merged-provider email', async () => {
+    await createUser('99999999-9999-9999-9999-999999999999', 'test@example.com', 5, {
+      sso_provider: 'google',
+    });
+    const body = (await (await adminUsersByEmail('test@example.com', adminToken)).json()) as any;
+    expect(body.users).toHaveLength(2);
+  });
+
+  it('sets a user\'s credit balance', async () => {
+    const res = await adminSetCredits(TEST_USER_ID, 50_000, adminToken);
+    expect(res.status).toBe(200);
+    expect(((await (await me()).json()) as any).current_credits).toBe(50_000);
+  });
+
+  it('rejects an out-of-range credits value', async () => {
+    const res = await adminSetCredits(TEST_USER_ID, -1, adminToken);
+    expect(res.status).toBe(400);
+  });
+
+  it('bans a user', async () => {
+    const res = await adminBan(TEST_USER_ID, adminToken);
+    expect(res.status).toBe(200);
+    expect((await me()).status).toBe(403);
+  });
+
+  it('lists and unflags a flagged job', async () => {
+    await push({ jobs: [job(1)] });
+    const jobId = ((await (await pull(1)).json()) as any).jobs[0].id;
+    await report(jobId);
+    for (let i = 0; i < 2; i++) {
+      const id = `6666666${i}-6666-6666-6666-666666666666`;
+      await createUser(id, `f${i}@example.com`, 100);
+      const t = tokenFor(id);
+      await pull(1, t);
+      await report(jobId, t);
+    }
+
+    const listed = (await (await adminFlaggedJobs(adminToken)).json()) as any;
+    expect(listed.jobs.map((j: any) => j.id)).toContain(jobId);
+
+    const unflagRes = await adminUnflag(jobId, adminToken);
+    expect(unflagRes.status).toBe(200);
+
+    const stillListed = (await (await adminFlaggedJobs(adminToken)).json()) as any;
+    expect(stillListed.jobs.map((j: any) => j.id)).not.toContain(jobId);
+  });
+
+  it('records who reported a job and why', async () => {
+    await push({ jobs: [job(1)] });
+    const jobId = ((await (await pull(1)).json()) as any).jobs[0].id;
+    await report(jobId); // TEST_USER_ID, reason: 'fake' (see the report() helper)
+
+    const body = (await (await adminJobReports(jobId, adminToken)).json()) as any;
+    expect(body.reports).toHaveLength(1);
+    expect(body.reports[0]).toMatchObject({ reporter_user_id: TEST_USER_ID, reason: 'fake' });
+  });
+
+  it('404s job-reports for an unknown job', async () => {
+    expect((await adminJobReports('11111111-2222-3333-4444-555555555555', adminToken)).status).toBe(404);
+  });
+
+  it('logs every admin write to the audit log, attributed to the acting admin', async () => {
+    await adminSetCredits(TEST_USER_ID, 500, adminToken);
+    await adminBan(TEST_USER_ID, adminToken);
+
+    const body = (await (await adminAuditLog(adminToken)).json()) as any;
+    const actions = body.actions.map((a: any) => a.action);
+    expect(actions).toContain('set_credits');
+    expect(actions).toContain('ban');
+    expect(body.actions.every((a: any) => a.admin_email === 'admin@example.com')).toBe(true);
+  });
+
+  it('reports aggregate stats', async () => {
+    await push({ jobs: [job(1), job(2)] });
+
+    const body = (await (await adminStats(adminToken)).json()) as any;
+    // TEST_USER_ID + ADMIN_ID from beforeEach.
+    expect(body.total_users).toBe(2);
+    expect(body.total_jobs).toBe(2);
+    expect(body.top_contributors.find((c: any) => c.email === 'test@example.com')).toMatchObject({
+      total_pushed: 2,
+    });
   });
 });

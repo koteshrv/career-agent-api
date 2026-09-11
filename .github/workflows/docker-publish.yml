@@ -57,7 +57,13 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          # Also tagged with the commit SHA, not just :latest — gives
+          # deployments (see career-agent-infra's README) a concrete,
+          # immutable tag to pin/roll back to instead of only ever tracking
+          # whatever :latest happens to be right now.
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.event.workflow_run.head_sha || github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             GIT_COMMIT_HASH=${{ github.event.workflow_run.head_sha || github.sha }}

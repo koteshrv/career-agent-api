@@ -4,8 +4,8 @@ info:
   description: A centralized crowdsourcing API for an open-source job scraping tool featuring a Give-to-Get credit economy.
   version: 1.0.0
 servers:
-  - url: https://career-agent-api.example.com
-    description: Production Server (behind your reverse proxy's public hostname)
+  - url: https://api.careeragent.fyi
+    description: Live community instance
   - url: http://localhost:3000
     description: Local Development Server
 

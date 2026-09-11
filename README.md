@@ -2,6 +2,8 @@
 
 A centralized crowdsourcing API for the open-source CareerAgent job automation tool. This API serves as the global job-sharing network.
 
+**Live community instance**: `https://api.careeragent.fyi` — see [API_REFERENCE.md](API_REFERENCE.md) to start pulling/pushing jobs against it, or the sections below to run your own.
+
 Built with **Node.js, Fastify, PostgreSQL, and Redis**.
 
 It features an asymmetric (RS256) JWT-based SSO system (GitHub & Google) and a "Give-to-Get" credit economy to bypass global IP scraping bans by decentralizing the fetching across the community.

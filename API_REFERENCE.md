@@ -4,7 +4,7 @@ Detailed request/response reference for every endpoint. For a machine-readable v
 
 ## Conventions
 
-**Base URL**: your deployment's origin (e.g. `https://api.example.com`), or `http://localhost:3000` locally.
+**Base URL**: the live community instance is `https://api.careeragent.fyi`. Running your own deployment, it's whatever origin you've put it behind, or `http://localhost:3000` locally.
 
 **Authentication**: `Authorization: Bearer <jwt>` on every endpoint marked 🔒 below. Tokens are RS256-signed, expire in 7 days (`expires_in: 604800`), and are obtained from `POST /api/auth/login`.
 

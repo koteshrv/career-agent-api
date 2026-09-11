@@ -2,6 +2,18 @@
   "name": "career-agent-api",
   "version": "1.0.0",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/koteshrv/career-agent-api.git"
+  },
+  "bugs": {
+    "url": "https://github.com/koteshrv/career-agent-api/issues"
+  },
+  "homepage": "https://api.careeragent.fyi",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsc",

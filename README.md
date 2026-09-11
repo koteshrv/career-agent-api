@@ -1,20 +1,55 @@
 # CareerAgent API
 
-A centralized crowdsourcing API for the open-source CareerAgent job automation tool. This API serves as the global job-sharing network.
+[![CI](https://github.com/koteshrv/career-agent-api/actions/workflows/ci.yml/badge.svg)](https://github.com/koteshrv/career-agent-api/actions/workflows/ci.yml)
+[![API Status](https://img.shields.io/website?url=https%3A%2F%2Fapi.careeragent.fyi%2Fhealth&label=api&up_message=online&down_message=offline)](https://api.careeragent.fyi)
+[![License: MIT](https://img.shields.io/github/license/koteshrv/career-agent-api)](LICENSE)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-**Live community instance**: `https://api.careeragent.fyi` — see [API_REFERENCE.md](API_REFERENCE.md) to start pulling/pushing jobs against it, or the sections below to run your own.
+A centralized crowdsourcing API for the open-source [CareerAgent](https://github.com/koteshrv/career-agent) job automation tool — the shared job-sharing network behind it. Built with Node.js, Fastify, PostgreSQL, and Redis.
 
-Built with **Node.js, Fastify, PostgreSQL, and Redis**.
+## Contents
 
-It features an asymmetric (RS256) JWT-based SSO system (GitHub & Google) and a "Give-to-Get" credit economy to bypass global IP scraping bans by decentralizing the fetching across the community.
+- [Overview](#overview)
+- [Features](#features)
+- [Quick Start](#quick-start)
+- [API Documentation](#api-documentation)
+- [Production Deployment](#production-deployment-docker)
+- [Local Development](#local-development)
+- [Contributing](#contributing)
+- [Security & Architecture Notes](#security--architecture-notes)
+- [License](#license)
 
-Accounts are identified by `(sso_provider, provider_user_id)` — the IdP's own stable subject id — not by email, since the same email can be independently verified by two different providers (or reassigned at the IdP over time). Logging in from a new provider always creates a separate account, even if the email matches one you already have.
+## Overview
 
-## 📖 API Documentation
+CareerAgent scrapes job listings, but any single machine doing that at volume runs into per-IP scraping bans. This API turns that into a shared problem with a shared fix: a "Give-to-Get" credit economy where contributing listings earns credits, and credits are spent to pull from everyone else's contributions — decentralizing the fetching across the whole community instead of hammering job boards from one IP.
 
-- **[API_REFERENCE.md](API_REFERENCE.md)** — full request/response reference for every endpoint: exact field types, every status code and error body, and the edge cases (idempotency, what happens when a job's contributor has deleted their account, etc.).
-- **[openapi.yaml](openapi.yaml)** — the same surface as a machine-readable OpenAPI 3.0 spec.
-- **[postman/postman_collection.json](postman/postman_collection.json)** — ready-to-run requests for every endpoint, including an Admin folder.
+Accounts authenticate via SSO (Google or GitHub). Signing in with a different provider always creates a separate account, even if the email matches one you already have.
+
+## Features
+
+- **SSO authentication** — Google and GitHub, asymmetric RS256 JWTs, no passwords stored
+- **Give-to-Get credit economy** — earn credits by pushing job listings, spend them pulling from the shared pool, with a free daily quota to evaluate the API before contributing
+- **Community moderation** — reports from users who've actually pulled a listing withdraw it automatically past a threshold, with a strike system that auto-bans repeat offenders
+- **Full admin API** — user/credit management, ban/unban, job moderation, and an audited action log, all behind an `is_admin` gate rather than raw database access
+- **Self-service account controls** — export your own data or delete your account at any time
+- **Soft job staleness** — old listings quietly age out of results after 60 days rather than being served forever
+
+## Quick Start
+
+No setup required to try the live instance:
+
+```bash
+curl https://api.careeragent.fyi/health
+# {"status":"ok","database":"ok","version":"..."}
+```
+
+Full auth flow (SSO login → JWT → authenticated requests) is in [API_REFERENCE.md](API_REFERENCE.md), or import [postman/postman_collection.json](postman/postman_collection.json) for a ready-to-run set of requests.
+
+## API Documentation
+
+- **[API_REFERENCE.md](API_REFERENCE.md)** — full request/response reference for every endpoint: exact field types, every status code and error body, and the edge cases (idempotency, what happens when a job's contributor has deleted their account, etc.)
+- **[openapi.yaml](openapi.yaml)** — the same surface as a machine-readable OpenAPI 3.0 spec
+- **[postman/postman_collection.json](postman/postman_collection.json)** — ready-to-run requests for every endpoint, including an Admin folder
 
 | Endpoint | Auth | Purpose |
 |---|---|---|
@@ -38,11 +73,9 @@ Accounts are identified by `(sso_provider, provider_user_id)` — the IdP's own 
 | `GET /` | — | API metadata and links |
 | `GET /health` | — | Liveness probe |
 
-🔒 = requires a JWT · 👑 = requires `is_admin` on that account (see [Bootstrapping an Admin](#bootstrapping-an-admin) below)
+🔒 requires a JWT · 👑 requires `is_admin` on that account (see [Bootstrapping an Admin](#bootstrapping-an-admin))
 
----
-
-## 🚀 Production Deployment (Docker)
+## Production Deployment (Docker)
 
 This API is fully containerized and designed to be deployed securely via Docker Compose.
 
@@ -89,9 +122,7 @@ UPDATE users SET is_admin = true WHERE email = 'you@example.com';
 ```
 From there, `/v1/admin/*` (see `openapi.yaml`) covers granting credits, banning/unbanning, and un-flagging jobs — see [DATABASE_QUERIES.md](DATABASE_QUERIES.md) for the raw-SQL fallback.
 
----
-
-## 💻 Local Development
+## Local Development
 
 If you want to contribute to the API or test changes locally without Docker:
 
@@ -118,12 +149,20 @@ The server will start locally via `tsx` on port `3000`.
 npm test
 ```
 
----
+## Contributing
 
-## 🔒 Security & Architecture Notes
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the PR workflow, what needs to stay in sync (docs, migrations), and how to report a bug or a security issue.
+
+## Security & Architecture Notes
+
 * **Network Isolation**: The `docker-compose.yml` is configured with strict network separation. The API talks to Postgres and Redis over an isolated internal `db-network`.
 * **Exposing the API**: `api` has no published host port — whatever reverse proxy you add (see [Expose the API](#4-expose-the-api) above) is meant to be the only path in. This is load-bearing, not just for TLS: the app trusts the header named by `TRUSTED_IP_HEADER` for rate limiting, which is only safe because nothing else can reach the container directly. Don't add a `ports:` mapping back onto `api` without also reconsidering `TRUSTED_IP_HEADER` — anything with a second, unproxied path to the container can set that header to whatever it wants.
 * **Revoking a token**: `POST /v1/auth/logout-all` (authenticated) invalidates every JWT previously issued to that account. There's no single-session revocation — JWTs aren't tracked individually, so it's all-or-nothing per account.
 * **Your data**: `GET /v1/me/export` returns everything tied to your account (profile, jobs contributed/pulled, reports filed). `DELETE /v1/me` (with `{"confirm": true}`) erases your account and its activity records — jobs you contributed stay in the shared pool with their attribution to you removed, rather than being deleted out from under everyone who's already pulled them.
 * **Admin API**: `/v1/admin/*` requires `is_admin` on your account (bootstrapped by hand — see above). A non-admin gets `404` from these routes, not `403`, so they can't be distinguished from a typo'd path.
 * **Login rate limiting**: `/v1/auth/login` has its own tighter budget (20 requests/60s per IP) on top of the general 100/60s applied everywhere else, since it's the highest-value target for credential stuffing.
+* **Reporting a vulnerability**: please don't open a public issue — see [CONTRIBUTING.md](CONTRIBUTING.md#reporting-a-security-issue).
+
+## License
+
+[MIT](LICENSE)

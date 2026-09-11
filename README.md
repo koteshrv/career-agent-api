@@ -1,13 +1,13 @@
 # CareerAgent API
 
 [![CI](https://github.com/koteshrv/career-agent-api/actions/workflows/ci.yml/badge.svg)](https://github.com/koteshrv/career-agent-api/actions/workflows/ci.yml)
+[![API Status](https://img.shields.io/website?url=https%3A%2F%2Fapi.careeragent.fyi%2Fhealth&label=api&up_message=online&down_message=offline)](https://api.careeragent.fyi)
 [![License: MIT](https://img.shields.io/github/license/koteshrv/career-agent-api)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-A centralized crowdsourcing API for the open-source CareerAgent job automation tool — the shared job-sharing network behind it. Built with Node.js, Fastify, PostgreSQL, and Redis.
+A centralized crowdsourcing API for the open-source [CareerAgent](https://github.com/koteshrv/career-agent) job automation tool — the shared job-sharing network behind it. Built with Node.js, Fastify, PostgreSQL, and Redis.
 
-**Live instance:** `https://api.careeragent.fyi`
-**Docs:** [API_REFERENCE.md](API_REFERENCE.md) · [openapi.yaml](openapi.yaml) · [Postman collection](postman/postman_collection.json)
+**API:** [https://api.careeragent.fyi](https://api.careeragent.fyi) · **Docs:** [API_REFERENCE.md](API_REFERENCE.md) · [openapi.yaml](openapi.yaml) · [Postman collection](postman/postman_collection.json)
 
 ## Contents
 
@@ -25,7 +25,7 @@ A centralized crowdsourcing API for the open-source CareerAgent job automation t
 
 CareerAgent scrapes job listings, but any single machine doing that at volume runs into per-IP scraping bans. This API turns that into a shared problem with a shared fix: a "Give-to-Get" credit economy where contributing listings earns credits, and credits are spent to pull from everyone else's contributions — decentralizing the fetching across the whole community instead of hammering job boards from one IP.
 
-Accounts authenticate via SSO (Google or GitHub) and are identified by `(sso_provider, provider_user_id)` — the IdP's own stable subject id — never by email alone, since the same email can be independently verified by two different providers, or reassigned at the IdP over time. Logging in from a new provider always creates a separate account, even if the email matches one you already have.
+Accounts authenticate via SSO (Google or GitHub). Signing in with a different provider always creates a separate account, even if the email matches one you already have.
 
 ## Features
 

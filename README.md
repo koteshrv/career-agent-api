@@ -23,11 +23,11 @@ A centralized crowdsourcing API for the open-source [CareerAgent](https://github
 
 CareerAgent scrapes job listings, but any single machine doing that at volume runs into per-IP scraping bans. This API turns that into a shared problem with a shared fix: a "Give-to-Get" credit economy where contributing listings earns credits, and credits are spent to pull from everyone else's contributions — decentralizing the fetching across the whole community instead of hammering job boards from one IP.
 
-Accounts authenticate via SSO (Google or GitHub). Signing in with a different provider always creates a separate account, even if the email matches one you already have.
+Agents authenticate anonymously. Running the tool generates a unique Agent ID to track credits privately.
 
 ## Features
 
-- **SSO authentication** — Google and GitHub, asymmetric RS256 JWTs, no passwords stored
+- **Anonymous Authentication** — Frictionless Agent IDs, asymmetric RS256 JWTs, zero PII stored
 - **Give-to-Get credit economy** — earn credits by pushing job listings, spend them pulling from the shared pool, with a free daily quota to evaluate the API before contributing
 - **Community moderation** — reports from users who've actually pulled a listing withdraw it automatically past a threshold, with a strike system that auto-bans repeat offenders
 - **Full admin API** — user/credit management, ban/unban, job moderation, and an audited action log, all behind an `is_admin` gate rather than raw database access
@@ -43,7 +43,7 @@ curl https://api.careeragent.fyi/health
 # {"status":"ok","database":"ok","version":"..."}
 ```
 
-Full auth flow (SSO login → JWT → authenticated requests) is in [API_REFERENCE.md](API_REFERENCE.md), or import [postman/postman_collection.json](postman/postman_collection.json) for a ready-to-run set of requests.
+Full auth flow (Anonymous registration → JWT → authenticated requests) is in [API_REFERENCE.md](API_REFERENCE.md), or import [postman/postman_collection.json](postman/postman_collection.json) for a ready-to-run set of requests.
 
 ## API Documentation
 
@@ -53,7 +53,7 @@ Full auth flow (SSO login → JWT → authenticated requests) is in [API_REFEREN
 
 | Endpoint | Auth | Purpose |
 |---|---|---|
-| `POST /v1/auth/login` | — | Exchange a Google/GitHub token for an API JWT |
+| `POST /v1/agent/register` | — | Generate a new anonymous Agent ID and get an API JWT |
 | `POST /v1/auth/logout-all` | 🔒 | Invalidate every issued token for this account |
 | `POST /v1/jobs/push` | 🔒 | Upload scraped jobs, earn credits |
 | `GET /v1/jobs/pull` | 🔒 | Consume jobs, spend credits/quota |
@@ -85,7 +85,7 @@ This API is fully containerized and designed to be deployed securely via Docker 
    ```bash
    cp .env.example .env
    ```
-3. Open `.env` and fill in your database passwords, RS256 JWT keys, and OAuth (GitHub/Google) client secrets.
+3. Open `.env` and fill in your database passwords and RS256 JWT keys.
 
 ### 2. Boot the Servers
 Start the API, PostgreSQL, and Redis containers in the background. The API will automatically pull the latest pre-built image from the GitHub Container Registry.

@@ -9,6 +9,11 @@ on:
     types: [completed]
     branches: [main]
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g. v1.0.0)'
+        required: true
+        type: string
 
 env:
   REGISTRY: ghcr.io
@@ -51,6 +56,15 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Generate Docker Tags
+        id: generate_tags
+        run: |
+          TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest,${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.event.workflow_run.head_sha || github.sha }}"
+          if [ "${{ github.event.inputs.version }}" != "" ]; then
+            TAGS="$TAGS,${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.event.inputs.version }}"
+          fi
+          echo "tags=$TAGS" >> $GITHUB_OUTPUT
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
@@ -61,9 +75,8 @@ jobs:
           # deployments (see career-agent-infra's README) a concrete,
           # immutable tag to pin/roll back to instead of only ever tracking
           # whatever :latest happens to be right now.
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.event.workflow_run.head_sha || github.sha }}
+          tags: ${{ steps.generate_tags.outputs.tags }}
+
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             GIT_COMMIT_HASH=${{ github.event.workflow_run.head_sha || github.sha }}

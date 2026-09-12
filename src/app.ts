@@ -104,7 +104,7 @@ const app = Fastify({
 });
 declare module 'fastify' {
   interface FastifyRequest {
-    user?: { id: string; email: string; is_admin: boolean; };
+    agent?: { id: string; is_admin: boolean; };
   }
 }
 
@@ -202,17 +202,17 @@ const authMiddleware = async (request: FastifyRequest, reply: FastifyReply) => {
   }
 
   // Validate user state in the database
-  const user = await DB.prepare(
-    'SELECT id, email, is_banned, token_version, is_admin FROM users WHERE id = ?'
+  const agent = await DB.prepare(
+    'SELECT id, is_banned, token_version, is_admin FROM agents WHERE id = ?'
   )
     .bind(payload.id)
-    .first<{ id: string; email: string; is_banned: number; token_version: number; is_admin: boolean }>();
+    .first<{ id: string; is_banned: number; token_version: number; is_admin: boolean }>();
 
-  if (!user) {
+  if (!agent) {
     return reply.status(401).send({ error: 'User not found' });
   }
 
-  if (user.is_banned) {
+  if (agent.is_banned) {
     return reply.status(403).send({ error: 'User is banned' });
   }
 
@@ -221,22 +221,22 @@ const authMiddleware = async (request: FastifyRequest, reply: FastifyReply) => {
   // is treated as version 0 — matching every account's default, so already-
   // issued tokens keep working until the first time logout-all is used.
   const tokenVersion = typeof payload.tv === 'number' ? payload.tv : 0;
-  if (tokenVersion !== user.token_version) {
+  if (tokenVersion !== agent.token_version) {
     return reply.status(401).send({ error: 'Token revoked' });
   }
 
   // Attach user payload to the request context for downstream routes
-    request.user = { id: user.id, email: user.email, is_admin: user.is_admin };
+    request.agent = { id: agent.id, is_admin: agent.is_admin };
 };
 
 /**
  * --- Admin Authorization Middleware ---
  * Chained after authMiddleware (which must run first — this only reads
- * request.user, it doesn't authenticate on its own). Gates /v1/admin/*.
+ * request.agent, it doesn't authenticate on its own). Gates /v1/admin/*.
  * There's no self-service way to become an admin; see is_admin in schema.sql.
  */
 const adminMiddleware = async (request: FastifyRequest, reply: FastifyReply) => {
-  if (!request.user?.is_admin) {
+  if (!request.agent?.is_admin) {
     // 404, not 403: a non-admin gets no signal that these routes exist at all.
     return reply.status(404).send({ error: 'Not found' });
   }
@@ -260,7 +260,7 @@ const SIGNUP_BONUS = 50;
 // ceiling, fabricated-but-unique URLs mint unlimited credits.
 const DAILY_PUSH_CREDIT_CAP = 500;
 
-// Distinct users who must report a job before it is flagged and withdrawn.
+// Distinct agents who must report a job before it is flagged and withdrawn.
 const REPORTS_TO_FLAG_JOB = 3;
 
 // Flagged jobs a contributor may accumulate before being auto-banned.
@@ -298,218 +298,38 @@ const isValidJobUrl = (value: string): boolean => {
 
 // --- API Routes ---
 
-/**
- * Tighter, dedicated limit for /v1/auth/login on top of the blanket global
- * one above — it's the highest-value target for credential stuffing /
- * brute-forcing IdP tokens, and 100/60s (fine for the rest of the API) is far
- * too generous for an auth endpoint specifically. 20/60s comfortably covers
- * a real user retrying a few times (e.g. after an expired OAuth code).
- */
-const loginRateLimitMiddleware = async (request: FastifyRequest, reply: FastifyReply) => {
-  const ip = getTrustedClientIp(request);
-  if (ip) {
-    const isAllowed = await checkRateLimit(ip, 20, 60, 'login');
-    if (!isAllowed) {
-      return reply.status(429).send({ error: 'Too Many Requests' });
-    }
-  }
-};
+
 
 /**
- * POST /v1/auth/login
- * SSO Login Endpoint. In a full production implementation, this endpoint would verify
- * an IdP-issued JWT (e.g., from Microsoft Entra or Google) against public JWKS before
- * issuing the internal API JWT.
+ * POST /v1/agent/register
+ * Generates an anonymous Agent ID and returns a persistent JWT for authentication.
+ * No email or SSO required.
  */
-app.post('/v1/auth/login', { preHandler: loginRateLimitMiddleware }, async (request, reply) => {
-  // See the equivalent comment in /v1/jobs/push: request.body is already
-  // parsed by the time this handler runs (malformed JSON is rejected earlier
-  // by Fastify itself, via the global error handler). The optional chaining
-  // only guards a technically-valid but non-object JSON body from throwing.
-  const body = request.body as any;
-  const idp_token = body?.idp_token;
-  const sso_provider = body?.sso_provider;
+app.post('/v1/agent/register', async (request, reply) => {
+  const clientIp = request.headers['cf-connecting-ip'] || request.headers['x-forwarded-for'] || request.ip || 'unknown';
 
-  if (!idp_token || !sso_provider) {
-    return reply.status(400).send({ error: 'Missing idp_token or sso_provider' });
-  }
-
-  if (sso_provider === 'google' && !process.env.GOOGLE_CLIENT_ID) {
-    return reply.status(500).send({ error: 'Server misconfiguration: GOOGLE_CLIENT_ID not set' });
-  }
-  // Same upfront check as Google above — without it, a missing GitHub secret
-  // fails deep inside the token exchange and surfaces as the generic 401
-  // "Identity Provider verification failed" (indistinguishable from an
-  // actually-invalid code), instead of a clear, debuggable 500.
-  if (sso_provider === 'github' && (!process.env.GITHUB_CLIENT_ID || !process.env.GITHUB_CLIENT_SECRET)) {
-    return reply
-      .status(500)
-      .send({ error: 'Server misconfiguration: GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET not set' });
-  }
-
-  let email: string | null = null;
-  // The IdP's own stable subject identifier — Google's `sub`, GitHub's numeric
-  // `id` — NOT the email. This is the real identity key (see users.provider_user_id):
-  // unlike email it can't be reassigned or changed by the user, and it's what
-  // stops two different providers that happen to verify the same email address
-  // from being silently treated as the same account.
-  let providerUserId: string | null = null;
-
-  try {
-    if (sso_provider === 'google') {
-      // Validate Google ID Token against Google's TokenInfo endpoint
-      const res = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${idp_token}`);
-      if (!res.ok) throw new Error('Invalid Google token');
-      const data = (await res.json()) as any;
-      // The tokeninfo endpoint proves the token is *a* valid Google-signed token,
-      // not that it was issued for THIS app — without checking `aud`, a token
-      // minted for any other Google-sign-in-enabled site would be accepted here.
-      if (data.aud !== process.env.GOOGLE_CLIENT_ID) {
-        throw new Error('Token audience mismatch');
-      }
-      if (data.email_verified !== 'true' && data.email_verified !== true) {
-        throw new Error('Google email not verified');
-      }
-      email = data.email;
-      providerUserId = data.sub;
-    } else if (sso_provider === 'github') {
-      // 1. Exchange the GitHub OAuth 'code' for an 'access_token'
-      const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
-        method: 'POST',
-        headers: {
-          'Accept': 'application/json',
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          client_id: process.env.GITHUB_CLIENT_ID,
-          client_secret: process.env.GITHUB_CLIENT_SECRET,
-          code: idp_token
-        })
-      });
-      const tokenData = (await tokenRes.json()) as any;
-      const accessToken = tokenData.access_token;
-
-      if (!accessToken) throw new Error('Invalid GitHub code or missing secrets');
-
-      // 2. Validate GitHub Access Token by fetching the user's profile
-      const res = await fetch('https://api.github.com/user', {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'User-Agent': 'Career-Agent-API'
-        }
-      });
-      if (!res.ok) throw new Error('Invalid GitHub token');
-      const data = (await res.json()) as any;
-      // GitHub's numeric user id is the account's permanent identifier — unlike
-      // a username or email, it's never reassigned or changed.
-      providerUserId = data.id !== undefined && data.id !== null ? String(data.id) : null;
-
-      // 3. GitHub sometimes hides the primary email, so we explicitly fetch their emails
-      if (!data.email) {
-        const emailRes = await fetch('https://api.github.com/user/emails', {
-          headers: { 
-            Authorization: `Bearer ${accessToken}`, 
-            'User-Agent': 'Career-Agent-API' 
-          }
-        });
-        const emails = (await emailRes.json()) as any[];
-        // Only trust verified addresses — GitHub lets an account hold unverified
-        // emails, and we don't want to log someone in as an address they don't own.
-        email = emails.find((e) => e.primary && e.verified)?.email
-          || emails.find((e) => e.verified)?.email;
-      } else {
-        email = data.email;
-      }
-    } else {
-      return reply.status(400).send({ error: 'Unsupported SSO provider (Only Google/GitHub supported)' });
-    }
-  } catch (err) {
-    // Logged server-side only — the client gets a generic message on purpose
-    // (don't hand an attacker a probe for which check failed), but this exact
-    // reason (aud mismatch vs. unverified email vs. actually-invalid token)
-    // otherwise vanishes, which makes this endpoint painful to debug from the
-    // outside. Check `wrangler tail` / the dashboard logs for this line.
-    console.error('Login verification failed:', sso_provider, err instanceof Error ? err.message : err);
-    return reply.status(401).send({ error: 'Identity Provider verification failed. Token invalid.' });
-  }
-
-  if (!email) {
-    return reply.status(400).send({ error: 'Failed to extract email from Identity Provider' });
-  }
-  if (!providerUserId) {
-    return reply.status(400).send({ error: 'Failed to extract a stable account id from Identity Provider' });
-  }
-
-  // Identity is anchored on (sso_provider, provider_user_id), not email — two
-  // different providers can each independently verify the same email address
-  // for two different real people/accounts, and emails can be reassigned at
-  // the IdP over time, so email alone is never a safe identity key.
-  let user = await DB.prepare(
-    'SELECT * FROM users WHERE sso_provider = ? AND provider_user_id = ?'
-  )
-    .bind(sso_provider, providerUserId)
-    .first();
-
-  // One-time backward-compat fallback for accounts created before
-  // provider_user_id existed (see migrations/0001_provider_scoped_identity.sql):
-  // match by (email, sso_provider) only among rows that haven't been backfilled
-  // yet, and backfill this row now. This preserves existing users' id/credits/
-  // history on their first login post-migration, without ever merging two
-  // distinct provider identities into one account.
-  if (!user) {
-    user = await DB.prepare(
-      'SELECT * FROM users WHERE email = ? AND sso_provider = ? AND provider_user_id IS NULL'
-    )
-      .bind(email, sso_provider)
-      .first();
-  }
-
-  let userId: string;
-  // Same trust boundary as the rate limiter above.
-  const clientIp = getTrustedClientIp(request) || 'unknown';
-
-  if (!user) {
-    // Register new user and award the initial Give-to-Get signup bonus
-    userId = crypto.randomUUID();
-    await DB.prepare(
-      'INSERT INTO users (id, email, sso_provider, provider_user_id, current_credits, last_login_ip) VALUES (?, ?, ?, ?, ?, ?)'
-    )
-      .bind(userId, email, sso_provider, providerUserId, SIGNUP_BONUS, clientIp)
-      .run();
-  } else {
-    userId = user.id as string;
-    // Update the latest IP and (for the backfill path above, or if the IdP's
-    // email for this account simply changed) the email/provider_user_id on file.
-    await DB.prepare(
-      'UPDATE users SET last_login_ip = ?, email = ?, provider_user_id = ? WHERE id = ?'
-    )
-      .bind(clientIp, email, providerUserId, userId)
-      .run();
-  }
-
-  // Construct the JWT payload expiring in 7 days
-  const payload = {
-    id: userId,
-    email: email, // Required for Local API verification
-    // Embeds the token_version this account had at issuance, so a later
-    // POST /v1/auth/logout-all (which bumps it) invalidates this token even
-    // though its signature stays valid. New users start at the schema
-    // default (0); an existing user's current value came back on the `user`
-    // row fetched above.
-    tv: user?.token_version ?? 0,
-    exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7,
-  };
+  const agentId = crypto.randomUUID();
   
-  // Sign the token with the internal PRIVATE_KEY using RS256
+  await DB.prepare(
+    'INSERT INTO agents (id, trust_score, current_credits, last_login_ip) VALUES (?, 50, ?, ?)'
+  )
+    .bind(agentId, SIGNUP_BONUS, clientIp as string)
+    .run();
+
+  const payload = {
+    id: agentId,
+    exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 365 * 10, // 10 years expiration
+  };
+
   const token = jwt.sign(payload, process.env.PRIVATE_KEY!, { algorithm: 'RS256' });
 
   return reply.status(200).send({
+    agent_id: agentId,
     token: token,
-    access_token: token, // Kept for backward compatibility
     token_type: 'bearer',
-    expires_in: 604800,
   });
 });
+
 
 /**
  * POST /v1/auth/logout-all
@@ -520,9 +340,9 @@ app.post('/v1/auth/login', { preHandler: loginRateLimitMiddleware }, async (requ
  * individually, so revocation is necessarily all-or-nothing per account.
  */
 app.post('/v1/auth/logout-all', { preHandler: authMiddleware }, async (request, reply) => {
-  const user = request.user!;
-  await DB.prepare('UPDATE users SET token_version = token_version + 1 WHERE id = ?')
-    .bind(user.id)
+  const agent = request.agent!;
+  await DB.prepare('UPDATE agents SET token_version = token_version + 1 WHERE id = ?')
+    .bind(agent.id)
     .run();
   return reply.send({ success: true, message: 'All tokens for this account have been invalidated.' });
 });
@@ -537,7 +357,7 @@ app.post('/v1/auth/logout-all', { preHandler: authMiddleware }, async (request, 
  * 1 unique job successfully inserted = 1 credit earned.
  */
 app.post('/v1/jobs/push', { preHandler: authMiddleware }, async (request, reply) => {
-  const user = request.user!;
+  const agent = request.agent!;
   // request.body is already fully parsed by the time this handler runs (a
   // genuinely malformed body never reaches here at all — Fastify's own JSON
   // parser rejects it earlier, handled by the global error handler above).
@@ -583,13 +403,13 @@ app.post('/v1/jobs/push', { preHandler: authMiddleware }, async (request, reply)
   const stmts = [];
   const insertJobStmt = DB.prepare(
     // INSERT OR IGNORE skips the insert if the URL violates the UNIQUE constraint
-    'INSERT INTO jobs (id, company, title, location, url, scraped_by_user_id) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING'
+    'INSERT INTO jobs (id, company, title, location, url, scraped_by_agent_id) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING'
   );
 
   for (const job of validJobs) {
     const jobId = crypto.randomUUID();
     stmts.push(
-      insertJobStmt.bind(jobId, job.company, job.title, job.location ?? null, job.url, user.id)
+      insertJobStmt.bind(jobId, job.company, job.title, job.location ?? null, job.url, agent.id)
     );
   }
 
@@ -628,9 +448,9 @@ app.post('/v1/jobs/push', { preHandler: authMiddleware }, async (request, reply)
 
   for (let attempt = 0; attempt < 3 && creditsEarned > 0; attempt++) {
     const quotaRow = await DB.prepare(
-      'SELECT pushed_today, last_push_date FROM users WHERE id = ?'
+      'SELECT pushed_today, last_push_date FROM agents WHERE id = ?'
     )
-      .bind(user.id)
+      .bind(agent.id)
       .first<{ pushed_today: number; last_push_date: string | null }>();
 
     if (!quotaRow) {
@@ -646,7 +466,7 @@ app.post('/v1/jobs/push', { preHandler: authMiddleware }, async (request, reply)
     }
 
     const result = await DB.prepare(
-      `UPDATE users
+      `UPDATE agents
        SET current_credits = current_credits + ?,
            total_pushed = total_pushed + ?,
            pushed_today = CASE WHEN last_push_date = ? THEN pushed_today + ? ELSE ? END,
@@ -661,7 +481,7 @@ app.post('/v1/jobs/push', { preHandler: authMiddleware }, async (request, reply)
         award,
         award,
         today,
-        user.id,
+        agent.id,
         today,
         award,
         DAILY_PUSH_CREDIT_CAP
@@ -697,7 +517,7 @@ app.post('/v1/jobs/push', { preHandler: authMiddleware }, async (request, reply)
  * 1 job pulled = 1 credit spent. Falls back to a strict daily free quota if out of credits.
  */
 app.get('/v1/jobs/pull', { preHandler: authMiddleware }, async (request, reply) => {
-  const user = request.user!;
+  const agent = request.agent!;
   const limitParam = parseInt((request.query as any).limit || '10', 10);
   if (!Number.isFinite(limitParam)) {
     return reply.status(400).send({ error: 'Invalid limit parameter' });
@@ -717,9 +537,9 @@ app.get('/v1/jobs/pull', { preHandler: authMiddleware }, async (request, reply) 
   // overspending credits or double-spending the daily quota.
   for (let attempt = 0; attempt < 3 && !reservation; attempt++) {
     const userData = await DB.prepare(
-      'SELECT current_credits, pulled_today, last_pull_date FROM users WHERE id = ?'
+      'SELECT current_credits, pulled_today, last_pull_date FROM agents WHERE id = ?'
     )
-      .bind(user.id)
+      .bind(agent.id)
       .first();
 
     if (!userData) {
@@ -741,13 +561,13 @@ app.get('/v1/jobs/pull', { preHandler: authMiddleware }, async (request, reply) 
       }
 
       const result = await DB.prepare(
-        `UPDATE users
+        `UPDATE agents
          SET current_credits = current_credits - ?,
              pulled_today = CASE WHEN last_pull_date = ? THEN pulled_today + ? ELSE ? END,
              last_pull_date = ?
          WHERE id = ? AND current_credits >= ?`
       )
-        .bind(want, today, want, want, today, user.id, want)
+        .bind(want, today, want, want, today, agent.id, want)
         .run();
 
       if (result.meta.changes > 0) {
@@ -770,13 +590,13 @@ app.get('/v1/jobs/pull', { preHandler: authMiddleware }, async (request, reply) 
           : undefined;
 
       const result = await DB.prepare(
-        `UPDATE users
+        `UPDATE agents
          SET pulled_today = CASE WHEN last_pull_date = ? THEN pulled_today + ? ELSE ? END,
              last_pull_date = ?
          WHERE id = ?
            AND (CASE WHEN last_pull_date = ? THEN pulled_today ELSE 0 END) + ? <= ?`
       )
-        .bind(today, want, want, today, user.id, today, want, DAILY_QUOTA)
+        .bind(today, want, want, today, agent.id, today, want, DAILY_QUOTA)
         .run();
 
       if (result.meta.changes > 0) {
@@ -801,17 +621,17 @@ app.get('/v1/jobs/pull', { preHandler: authMiddleware }, async (request, reply) 
   const candidates = await DB.prepare(
     `SELECT id, company, title, location, url, created_at FROM jobs
      WHERE is_flagged = false
-       AND id NOT IN (SELECT job_id FROM pulled_jobs WHERE user_id = ?)
+       AND id NOT IN (SELECT job_id FROM pulled_jobs WHERE agent_id = ?)
        AND (? OR created_at >= NOW() - (INTERVAL '1 day' * ?))
      ORDER BY created_at DESC LIMIT ?`
   )
-    .bind(user.id, includeStale, PULL_MAX_JOB_AGE_DAYS, reservation.want + 1)
+    .bind(agent.id, includeStale, PULL_MAX_JOB_AGE_DAYS, reservation.want + 1)
     .all();
 
   const hasMore = candidates.results.length > reservation.want;
   const toClaim = candidates.results.slice(0, reservation.want);
 
-  // Claim each candidate via INSERT OR IGNORE on the (user_id, job_id) primary
+  // Claim each candidate via INSERT OR IGNORE on the (agent_id, job_id) primary
   // key *before* trusting it as delivered. Two concurrent requests for the same
   // user can both select the same candidate (neither has claimed it yet at
   // SELECT time) — only one INSERT wins the PK race, so only the winner keeps
@@ -821,10 +641,10 @@ app.get('/v1/jobs/pull', { preHandler: authMiddleware }, async (request, reply) 
   let confirmed: any[] = [];
   if (toClaim.length > 0) {
     const markSeenStmt = DB.prepare(
-      'INSERT INTO pulled_jobs (user_id, job_id) VALUES (?, ?) ON CONFLICT DO NOTHING'
+      'INSERT INTO pulled_jobs (agent_id, job_id) VALUES (?, ?) ON CONFLICT DO NOTHING'
     );
     const claimResults = await DB.batch(
-      toClaim.map((job: any) => markSeenStmt.bind(user.id, job.id))
+      toClaim.map((job: any) => markSeenStmt.bind(agent.id, job.id))
     );
     confirmed = toClaim.filter((_: any, i: number) => claimResults[i].meta.changes > 0);
   }
@@ -834,26 +654,26 @@ app.get('/v1/jobs/pull', { preHandler: authMiddleware }, async (request, reply) 
 
   // Refund whatever portion of the reservation couldn't be fulfilled (e.g. the
   // shared pool ran dry, was already fully seen, or was lost to a concurrent
-  // claim above), so users aren't charged for jobs they didn't actually receive.
+  // claim above), so agents aren't charged for jobs they didn't actually receive.
   if (unused > 0) {
     if (reservation.fromCredits) {
       await DB.prepare(
-        'UPDATE users SET current_credits = current_credits + ?, pulled_today = pulled_today - ? WHERE id = ?'
+        'UPDATE agents SET current_credits = current_credits + ?, pulled_today = pulled_today - ? WHERE id = ?'
       )
-        .bind(unused, unused, user.id)
+        .bind(unused, unused, agent.id)
         .run();
     } else {
       await DB.prepare(
-        'UPDATE users SET pulled_today = pulled_today - ? WHERE id = ?'
+        'UPDATE agents SET pulled_today = pulled_today - ? WHERE id = ?'
       )
-        .bind(unused, user.id)
+        .bind(unused, agent.id)
         .run();
     }
   }
 
   if (jobsReturnedCount > 0) {
-    await DB.prepare('UPDATE users SET total_pulled = total_pulled + ? WHERE id = ?')
-      .bind(jobsReturnedCount, user.id)
+    await DB.prepare('UPDATE agents SET total_pulled = total_pulled + ? WHERE id = ?')
+      .bind(jobsReturnedCount, agent.id)
       .run();
   }
 
@@ -880,15 +700,15 @@ app.get('/v1/jobs/pull', { preHandler: authMiddleware }, async (request, reply) 
  * Community quality control: report a job as fake, dead, or spam.
  *
  * Only a user who actually pulled the job may report it, and the (job_id,
- * reporter_user_id) primary key allows one report per user per job — together
+ * reporter_agent_id) primary key allows one report per user per job — together
  * these stop a single account from flagging jobs on its own or brigading a
  * contributor it has never interacted with. Once REPORTS_TO_FLAG_JOB distinct
- * users report the same job it is withdrawn from circulation, the contributor's
+ * agents report the same job it is withdrawn from circulation, the contributor's
  * earned credit for it is clawed back, and a strike is recorded; at
  * FLAGS_TO_BAN_USER strikes the contributor is auto-banned.
  */
 app.post('/v1/jobs/report', { preHandler: authMiddleware }, async (request, reply) => {
-  const user = request.user!;
+  const agent = request.agent!;
   // See the equivalent comment in /v1/jobs/push above: request.body is
   // already parsed here, and the optional chaining only guards a
   // technically-valid but non-object JSON body from throwing on destructure.
@@ -904,13 +724,13 @@ app.post('/v1/jobs/report', { preHandler: authMiddleware }, async (request, repl
   }
 
   const job = await DB.prepare(
-    'SELECT id, scraped_by_user_id, is_flagged FROM jobs WHERE id = ?'
+    'SELECT id, scraped_by_agent_id, is_flagged FROM jobs WHERE id = ?'
   )
     .bind(job_id)
-    // scraped_by_user_id is nullable: the contributor may have since deleted
+    // scraped_by_agent_id is nullable: the contributor may have since deleted
     // their account (DELETE /v1/me detaches the job rather than deleting it
     // — see migrations/0004_nullable_job_contributor.sql).
-    .first<{ id: string; scraped_by_user_id: string | null; is_flagged: boolean }>();
+    .first<{ id: string; scraped_by_agent_id: string | null; is_flagged: boolean }>();
 
   if (!job) {
     return reply.status(404).send({ error: 'Job not found' });
@@ -919,9 +739,9 @@ app.post('/v1/jobs/report', { preHandler: authMiddleware }, async (request, repl
   // Gate reporting on having actually received the job. Without this, reporting
   // becomes a free weapon against any contributor.
   const hasPulled = await DB.prepare(
-    'SELECT 1 FROM pulled_jobs WHERE user_id = ? AND job_id = ?'
+    'SELECT 1 FROM pulled_jobs WHERE agent_id = ? AND job_id = ?'
   )
-    .bind(user.id, job_id)
+    .bind(agent.id, job_id)
     .first();
 
   if (!hasPulled) {
@@ -929,9 +749,9 @@ app.post('/v1/jobs/report', { preHandler: authMiddleware }, async (request, repl
   }
 
   const insert = await DB.prepare(
-    'INSERT INTO job_reports (job_id, reporter_user_id, reason) VALUES (?, ?, ?) ON CONFLICT DO NOTHING'
+    'INSERT INTO job_reports (job_id, reporter_agent_id, reason) VALUES (?, ?, ?) ON CONFLICT DO NOTHING'
   )
-    .bind(job_id, user.id, typeof reason === 'string' ? reason.slice(0, MAX_FIELD_LENGTH) : null)
+    .bind(job_id, agent.id, typeof reason === 'string' ? reason.slice(0, MAX_FIELD_LENGTH) : null)
     .run();
 
   if (insert.meta.changes === 0) {
@@ -966,27 +786,27 @@ app.post('/v1/jobs/report', { preHandler: authMiddleware }, async (request, repl
 
       // No strike to record if the contributor has since deleted their
       // account — there's no user row left to credit it against.
-      if (job.scraped_by_user_id) {
+      if (job.scraped_by_agent_id) {
         // Claw back the credit earned for this job and record a strike. Credits
         // are floored at 0 rather than going negative, which would silently push
         // the contributor into the free-quota branch of the pull economy.
         const strike = await DB.prepare(
           // GREATEST, not MAX: Postgres's MAX is aggregate-only (no two-argument
           // scalar form) — this floors at 0 without going through an aggregate.
-          `UPDATE users
+          `UPDATE agents
            SET flagged_count = flagged_count + 1,
                current_credits = GREATEST(0, current_credits - 1)
            WHERE id = ?
            RETURNING flagged_count`
         )
-          .bind(job.scraped_by_user_id)
+          .bind(job.scraped_by_agent_id)
           .first<{ flagged_count: number }>();
 
         if (strike && strike.flagged_count >= FLAGS_TO_BAN_USER) {
           const ban = await DB.prepare(
-            'UPDATE users SET is_banned = true WHERE id = ? AND is_banned = false'
+            'UPDATE agents SET is_banned = true WHERE id = ? AND is_banned = false'
           )
-            .bind(job.scraped_by_user_id)
+            .bind(job.scraped_by_agent_id)
             .run();
           contributorBanned = ban.meta.changes > 0;
         }
@@ -1008,14 +828,14 @@ app.post('/v1/jobs/report', { preHandler: authMiddleware }, async (request, repl
  * Returns the authenticated user's current Give-to-Get economy balance and stats.
  */
 app.get('/v1/me', { preHandler: authMiddleware }, async (request, reply) => {
-  const user = request.user!;
+  const agent = request.agent!;
 
   const userData = await DB.prepare(
     `SELECT id, email, current_credits, total_pushed, total_pulled,
             pulled_today, last_pull_date, pushed_today, last_push_date, flagged_count
-     FROM users WHERE id = ?`
+     FROM agents WHERE id = ?`
   )
-    .bind(user.id)
+    .bind(agent.id)
     .first<{
       id: string;
       email: string;
@@ -1051,18 +871,18 @@ app.get('/v1/me', { preHandler: authMiddleware }, async (request, reply) => {
  * GET /v1/me/export
  * Self-service data export: everything this account's own data touches —
  * profile, jobs contributed, jobs pulled, reports filed. Community data other
- * users generated (e.g. reports *against* this account's jobs) isn't this
+ * agents generated (e.g. reports *against* this account's jobs) isn't this
  * account's own data and isn't included.
  */
 app.get('/v1/me/export', { preHandler: authMiddleware }, async (request, reply) => {
-  const user = request.user!;
+  const agent = request.agent!;
 
   const profile = await DB.prepare(
     `SELECT id, email, sso_provider, current_credits, total_pushed, total_pulled,
             flagged_count, is_banned, created_at
-     FROM users WHERE id = ?`
+     FROM agents WHERE id = ?`
   )
-    .bind(user.id)
+    .bind(agent.id)
     .first();
 
   if (!profile) {
@@ -1072,22 +892,22 @@ app.get('/v1/me/export', { preHandler: authMiddleware }, async (request, reply) 
   const [contributed, pulled, reported] = await Promise.all([
     DB.prepare(
       `SELECT id, company, title, location, url, is_flagged, created_at
-       FROM jobs WHERE scraped_by_user_id = ? ORDER BY created_at DESC`
+       FROM jobs WHERE scraped_by_agent_id = ? ORDER BY created_at DESC`
     )
-      .bind(user.id)
+      .bind(agent.id)
       .all(),
     DB.prepare(
       `SELECT j.id, j.company, j.title, j.url, p.pulled_at
        FROM pulled_jobs p JOIN jobs j ON j.id = p.job_id
-       WHERE p.user_id = ? ORDER BY p.pulled_at DESC`
+       WHERE p.agent_id = ? ORDER BY p.pulled_at DESC`
     )
-      .bind(user.id)
+      .bind(agent.id)
       .all(),
     DB.prepare(
       `SELECT job_id, reason, created_at FROM job_reports
-       WHERE reporter_user_id = ? ORDER BY created_at DESC`
+       WHERE reporter_agent_id = ? ORDER BY created_at DESC`
     )
-      .bind(user.id)
+      .bind(agent.id)
       .all(),
   ]);
 
@@ -1104,9 +924,9 @@ app.get('/v1/me/export', { preHandler: authMiddleware }, async (request, reply) 
  * Self-service account deletion. Erases this account's own row (email, IP,
  * credit/stat history) along with pulled_jobs/job_reports rows that
  * reference it (ON DELETE CASCADE — those are this account's own activity
- * records). Jobs this account contributed are NOT deleted: scraped_by_user_id
+ * records). Jobs this account contributed are NOT deleted: scraped_by_agent_id
  * is ON DELETE SET NULL (see migrations/0004_nullable_job_contributor.sql) —
- * jobs are a shared resource other users may already rely on, not this
+ * jobs are a shared resource other agents may already rely on, not this
  * account's personal data once contributed to the pool. This also
  * immediately invalidates every JWT for the account, since authMiddleware's
  * user lookup will simply find no row.
@@ -1115,14 +935,14 @@ app.get('/v1/me/export', { preHandler: authMiddleware }, async (request, reply) 
  * accidental request from a buggy client) does nothing.
  */
 app.delete('/v1/me', { preHandler: authMiddleware }, async (request, reply) => {
-  const user = request.user!;
+  const agent = request.agent!;
   const body = request.body as any;
 
   if (body?.confirm !== true) {
     return reply.status(400).send({ error: 'Confirm deletion by sending {"confirm": true}' });
   }
 
-  await DB.prepare('DELETE FROM users WHERE id = ?').bind(user.id).run();
+  await DB.prepare('DELETE FROM agents WHERE id = ?').bind(agent.id).run();
 
   return reply.send({ success: true, message: 'Account and personal data deleted.' });
 });
@@ -1132,7 +952,7 @@ app.delete('/v1/me', { preHandler: authMiddleware }, async (request, reply) => {
  * Replaces the raw-SQL moderation workflow in DATABASE_QUERIES.md with
  * authenticated, audited endpoints for the same operations. There's no
  * self-service way to become an admin — bootstrap the first one directly:
- *   UPDATE users SET is_admin = true WHERE email = 'you@example.com';
+ *   UPDATE agents SET is_admin = true WHERE email = 'you@example.com';
  * adminMiddleware 404s (not 403) for a non-admin, so a logged-in
  * non-admin poking at these paths can't distinguish them from a typo'd route.
  */
@@ -1147,42 +967,42 @@ async function logAdminAction(
   details?: string
 ): Promise<void> {
   await DB.prepare(
-    'INSERT INTO admin_actions (id, admin_user_id, action, target_type, target_id, details) VALUES (?, ?, ?, ?, ?, ?)'
+    'INSERT INTO admin_actions (id, admin_agent_id, action, target_type, target_id, details) VALUES (?, ?, ?, ?, ?, ?)'
   )
     .bind(crypto.randomUUID(), adminId, action, targetType, targetId, details ?? null)
     .run();
 }
 
 app.get(
-  '/v1/admin/users',
+  '/v1/admin/agents',
   { preHandler: [authMiddleware, adminMiddleware] },
   async (request, reply) => {
     const email = (request.query as any)?.email;
     if (typeof email !== 'string' || email.length === 0) {
       return reply.status(400).send({ error: 'Missing email query parameter' });
     }
-    // Email is no longer unique (see provider_user_id) — a lookup can
+    // Email is no longer unique (see provider_agent_id) — a lookup can
     // legitimately return more than one account.
-    const users = await DB.prepare(
+    const agents = await DB.prepare(
       `SELECT id, email, sso_provider, current_credits, total_pushed, total_pulled,
               flagged_count, is_banned, is_admin, created_at
-       FROM users WHERE email = ? ORDER BY created_at ASC`
+       FROM agents WHERE email = ? ORDER BY created_at ASC`
     )
       .bind(email)
       .all();
-    return reply.send({ users: users.results });
+    return reply.send({ agents: agents.results });
   }
 );
 
 app.get(
-  '/v1/admin/users/:id',
+  '/v1/admin/agents/:id',
   { preHandler: [authMiddleware, adminMiddleware] },
   async (request, reply) => {
     const { id } = request.params as { id: string };
     const targetUser = await DB.prepare(
       `SELECT id, email, sso_provider, current_credits, total_pushed, total_pulled,
               flagged_count, is_banned, is_admin, created_at
-       FROM users WHERE id = ?`
+       FROM agents WHERE id = ?`
     )
       .bind(id)
       .first();
@@ -1194,7 +1014,7 @@ app.get(
 );
 
 app.post(
-  '/v1/admin/users/:id/credits',
+  '/v1/admin/agents/:id/credits',
   { preHandler: [authMiddleware, adminMiddleware] },
   async (request, reply) => {
     const { id } = request.params as { id: string };
@@ -1211,45 +1031,45 @@ app.post(
     }
     // Sets the absolute balance (matches DATABASE_QUERIES.md's "Grant a user
     // N credits" pattern), not a delta — the caller decides the resulting total.
-    const result = await DB.prepare('UPDATE users SET current_credits = ? WHERE id = ?')
+    const result = await DB.prepare('UPDATE agents SET current_credits = ? WHERE id = ?')
       .bind(credits, id)
       .run();
     if (result.meta.changes === 0) {
       return reply.status(404).send({ error: 'User not found' });
     }
-    await logAdminAction(request.user!.id, 'set_credits', 'user', id, `credits=${credits}`);
+    await logAdminAction(request.agent!.id, 'set_credits', 'user', id, `credits=${credits}`);
     return reply.send({ success: true, current_credits: credits });
   }
 );
 
 app.post(
-  '/v1/admin/users/:id/ban',
+  '/v1/admin/agents/:id/ban',
   { preHandler: [authMiddleware, adminMiddleware] },
   async (request, reply) => {
     const { id } = request.params as { id: string };
-    const result = await DB.prepare('UPDATE users SET is_banned = true WHERE id = ?')
+    const result = await DB.prepare('UPDATE agents SET is_banned = true WHERE id = ?')
       .bind(id)
       .run();
     if (result.meta.changes === 0) {
       return reply.status(404).send({ error: 'User not found' });
     }
-    await logAdminAction(request.user!.id, 'ban', 'user', id);
+    await logAdminAction(request.agent!.id, 'ban', 'user', id);
     return reply.send({ success: true });
   }
 );
 
 app.post(
-  '/v1/admin/users/:id/unban',
+  '/v1/admin/agents/:id/unban',
   { preHandler: [authMiddleware, adminMiddleware] },
   async (request, reply) => {
     const { id } = request.params as { id: string };
-    const result = await DB.prepare('UPDATE users SET is_banned = false WHERE id = ?')
+    const result = await DB.prepare('UPDATE agents SET is_banned = false WHERE id = ?')
       .bind(id)
       .run();
     if (result.meta.changes === 0) {
       return reply.status(404).send({ error: 'User not found' });
     }
-    await logAdminAction(request.user!.id, 'unban', 'user', id);
+    await logAdminAction(request.agent!.id, 'unban', 'user', id);
     return reply.send({ success: true });
   }
 );
@@ -1261,7 +1081,7 @@ app.get(
     const limitParam = parseInt((request.query as any)?.limit || '50', 10);
     const limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam, 1), 200) : 50;
     const jobs = await DB.prepare(
-      `SELECT id, company, title, location, url, scraped_by_user_id, created_at
+      `SELECT id, company, title, location, url, scraped_by_agent_id, created_at
        FROM jobs WHERE is_flagged = true ORDER BY created_at DESC LIMIT ?`
     )
       .bind(limit)
@@ -1281,7 +1101,7 @@ app.post(
     if (result.meta.changes === 0) {
       return reply.status(404).send({ error: 'Job not found' });
     }
-    await logAdminAction(request.user!.id, 'unflag_job', 'job', id);
+    await logAdminAction(request.agent!.id, 'unflag_job', 'job', id);
     return reply.send({ success: true });
   }
 );
@@ -1302,11 +1122,11 @@ app.get(
     if (!job) {
       return reply.status(404).send({ error: 'Job not found' });
     }
-    // A plain JOIN, not LEFT JOIN: job_reports.reporter_user_id is NOT NULL
+    // A plain JOIN, not LEFT JOIN: job_reports.reporter_agent_id is NOT NULL
     // with ON DELETE CASCADE, so a report row can never outlive its reporter.
     const reports = await DB.prepare(
-      `SELECT r.reporter_user_id, u.email AS reporter_email, r.reason, r.created_at
-       FROM job_reports r JOIN users u ON u.id = r.reporter_user_id
+      `SELECT r.reporter_agent_id, u.email AS reporter_email, r.reason, r.created_at
+       FROM job_reports r JOIN agents u ON u.id = r.reporter_agent_id
        WHERE r.job_id = ? ORDER BY r.created_at ASC`
     )
       .bind(id)
@@ -1325,13 +1145,13 @@ app.get(
   async (request, reply) => {
     const limitParam = parseInt((request.query as any)?.limit || '50', 10);
     const limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam, 1), 200) : 50;
-    // LEFT JOIN, not a plain JOIN: admin_user_id is ON DELETE SET NULL, so a
+    // LEFT JOIN, not a plain JOIN: admin_agent_id is ON DELETE SET NULL, so a
     // past action's row outlives an admin who later deletes their account —
     // admin_email comes back null for those rather than the row vanishing.
     const actions = await DB.prepare(
-      `SELECT a.id, a.admin_user_id, u.email AS admin_email, a.action, a.target_type,
+      `SELECT a.id, a.admin_agent_id, u.email AS admin_email, a.action, a.target_type,
               a.target_id, a.details, a.created_at
-       FROM admin_actions a LEFT JOIN users u ON u.id = a.admin_user_id
+       FROM admin_actions a LEFT JOIN agents u ON u.id = a.admin_agent_id
        ORDER BY a.created_at DESC LIMIT ?`
     )
       .bind(limit)
@@ -1352,8 +1172,8 @@ app.get(
     const [totals, topContributors] = await Promise.all([
       DB.prepare(
         `SELECT
-           (SELECT COUNT(*)::int FROM users) AS total_users,
-           (SELECT COUNT(*)::int FROM users WHERE is_banned = true) AS total_banned_users,
+           (SELECT COUNT(*)::int FROM agents) AS total_agents,
+           (SELECT COUNT(*)::int FROM agents WHERE is_banned = true) AS total_banned_agents,
            (SELECT COUNT(*)::int FROM jobs) AS total_jobs,
            (SELECT COUNT(*)::int FROM jobs WHERE is_flagged = true) AS total_flagged_jobs,
            (SELECT COUNT(*)::int FROM jobs
@@ -1366,7 +1186,7 @@ app.get(
         .first(),
       DB.prepare(
         `SELECT email, total_pushed, current_credits, is_banned
-         FROM users ORDER BY total_pushed DESC LIMIT 10`
+         FROM agents ORDER BY total_pushed DESC LIMIT 10`
       ).all(),
     ]);
     return reply.send({ ...(totals ?? {}), top_contributors: topContributors.results });

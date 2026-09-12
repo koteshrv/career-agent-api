@@ -6,9 +6,9 @@ Detailed request/response reference for every endpoint. For a machine-readable v
 
 **Base URL**: the live community instance is `https://api.careeragent.fyi`. Running your own deployment, it's whatever origin you've put it behind, or `http://localhost:3000` locally.
 
-**Authentication**: `Authorization: Bearer <jwt>` on every endpoint marked 🔒 below. Tokens are RS256-signed, expire in 7 days (`expires_in: 604800`), and are obtained from `POST /v1/auth/login`.
+**Authentication**: `Authorization: Bearer <jwt>` on every endpoint marked 🔒 below. Tokens are RS256-signed, expire in 10 years, and are obtained from `POST /v1/agent/register`.
 
-**Content type**: `Content-Type: application/json` on every request that has a body. Endpoints that take **no** body (`POST /v1/auth/logout-all`, `POST /v1/admin/users/:id/ban`, `/unban`, `POST /v1/admin/jobs/:id/unflag`) must be called **without** a `Content-Type: application/json` header and without a body — Fastify itself rejects an `application/json` content type paired with an empty body (`400 FST_ERR_CTP_EMPTY_JSON_BODY`) before the route handler ever runs.
+**Content type**: `Content-Type: application/json` on every request that has a body. Endpoints that take **no** body (`POST /v1/auth/logout-all`, `POST /v1/admin/agents/:id/ban`, `/unban`, `POST /v1/admin/jobs/:id/unflag`) must be called **without** a `Content-Type: application/json` header and without a body — Fastify itself rejects an `application/json` content type paired with an empty body (`400 FST_ERR_CTP_EMPTY_JSON_BODY`) before the route handler ever runs.
 
 **Error shape**: almost every error response is `{ "error": "<message>" }`. The one exception is the global fallback for truly unexpected server-side failures, which also includes a `requestId` for correlating with server logs:
 ```json
@@ -18,14 +18,13 @@ A 4xx that Fastify itself generates before a route handler runs (malformed JSON,
 
 **Rate limiting**: applied globally, before every request, keyed on whichever header the deployment's `TRUSTED_IP_HEADER` env var names (only meaningful when the deployment is actually fronted by a reverse proxy that sets it — absent in plain local development, so no rate limiting applies there):
 - **Global**: 100 requests / 60s per IP, across the whole API.
-- **`POST /v1/auth/login` specifically**: an additional, tighter 20 requests / 60s per IP, on top of the global budget — it's the highest-value target for credential stuffing.
 
 Either limit returns:
 ```
 429 { "error": "Too Many Requests" }
 ```
 
-**Identity model**: accounts are keyed on `(sso_provider, provider_user_id)` — the IdP's own stable subject id (Google's `sub`, GitHub's numeric `id`) — never on email alone. The same email verified by two different providers gets two separate accounts.
+**Identity model**: accounts are keyed on `(sso_provider, provider_agent_id)` — the IdP's own stable subject id (Google's `sub`, GitHub's numeric `id`) — never on agent_id alone. The same agent_id verified by two different providers gets two separate accounts.
 
 **Admin routes**: return `404 { "error": "Not found" }` for a non-admin caller (not `403`) — a logged-in non-admin can't distinguish an admin route from a typo'd path. There is no self-service way to become an admin (see [DATABASE_QUERIES.md](DATABASE_QUERIES.md)).
 
@@ -34,7 +33,7 @@ Either limit returns:
 ## Table of Contents
 
 **Auth**
-- [`POST /v1/auth/login`](#post-v1authlogin)
+- [`POST /v1/agent/register`](#post-v1authregistration)
 - [`POST /v1/auth/logout-all`](#post-v1authlogout-all-) 🔒
 
 **Job Economy**
@@ -48,11 +47,11 @@ Either limit returns:
 - [`DELETE /v1/me`](#delete-v1me-) 🔒
 
 **Admin** (all require an `is_admin` account)
-- [`GET /v1/admin/users`](#get-v1adminusers-) 🔒
-- [`GET /v1/admin/users/:id`](#get-v1adminusersid-) 🔒
-- [`POST /v1/admin/users/:id/credits`](#post-v1adminusersidcredits-) 🔒
-- [`POST /v1/admin/users/:id/ban`](#post-v1adminusersidban-) 🔒
-- [`POST /v1/admin/users/:id/unban`](#post-v1adminusersidunban-) 🔒
+- [`GET /v1/admin/agents`](#get-v1adminagents-) 🔒
+- [`GET /v1/admin/agents/:id`](#get-v1adminagentsid-) 🔒
+- [`POST /v1/admin/agents/:id/credits`](#post-v1adminagentsidcredits-) 🔒
+- [`POST /v1/admin/agents/:id/ban`](#post-v1adminagentsidban-) 🔒
+- [`POST /v1/admin/agents/:id/unban`](#post-v1adminagentsidunban-) 🔒
 - [`GET /v1/admin/jobs/flagged`](#get-v1adminjobsflagged-) 🔒
 - [`POST /v1/admin/jobs/:id/unflag`](#post-v1adminjobsidunflag-) 🔒
 - [`GET /v1/admin/jobs/:id/reports`](#get-v1adminjobsidreports-) 🔒
@@ -65,9 +64,9 @@ Either limit returns:
 
 ---
 
-## `POST /v1/auth/login`
+## `POST /v1/agent/register`
 
-Exchanges a Google ID token or GitHub OAuth code for an internal API JWT. No auth required to call this. Subject to the tighter 20/60s login rate limit in addition to the global one.
+Generates a new anonymous Agent ID and returns an internal API JWT. No auth required to call this.
 
 ### Request
 
@@ -83,8 +82,8 @@ Exchanges a Google ID token or GitHub OAuth code for an internal API JWT. No aut
 | `idp_token` | string | yes | A Google **ID token** (a JWT), or a GitHub OAuth **authorization code** (not an access token). |
 | `sso_provider` | string | yes | `"google"` or `"github"`. Anything else → 400. |
 
-**Google verification**: the token is sent to Google's `tokeninfo` endpoint; the response's `aud` must match your `GOOGLE_CLIENT_ID` and `email_verified` must be true.
-**GitHub verification**: the code is exchanged for an access token, which is used to fetch the GitHub profile (and `/user/emails` if the primary email is hidden — only a `verified` address is trusted).
+**Google verification**: the token is sent to Google's `tokeninfo` endpoint; the response's `aud` must match your `GOOGLE_CLIENT_ID` and `agent_id_verified` must be true.
+**GitHub verification**: the code is exchanged for an access token, which is used to fetch the GitHub profile (and `/agent/agent_ids` if the primary agent_id is hidden — only a `verified` address is trusted).
 
 ### Response
 
@@ -97,15 +96,15 @@ Exchanges a Google ID token or GitHub OAuth code for an internal API JWT. No aut
   "expires_in": 604800
 }
 ```
-`token` and `access_token` are identical (the latter kept for backward compatibility). A brand-new account is created on first login with `current_credits` set to the signup bonus (50); an existing account's `last_login_ip` and (if changed) `email`/`provider_user_id` are updated.
+A brand-new anonymous agent is created with `current_credits` set to the signup bonus (50) and `trust_score` set to 50.
 
 **400**:
 - `{ "error": "Missing idp_token or sso_provider" }`
 - `{ "error": "Unsupported SSO provider (Only Google/GitHub supported)" }`
-- `{ "error": "Failed to extract email from Identity Provider" }` — the IdP didn't return a usable (verified) email.
+- `{ "error": "Failed to extract agent_id from Identity Provider" }` — the IdP didn't return a usable (verified) agent_id.
 - `{ "error": "Failed to extract a stable account id from Identity Provider" }` — no `sub` (Google) / `id` (GitHub) came back.
 
-**401**: `{ "error": "Identity Provider verification failed. Token invalid." }` — covers a forged/expired/invalid token, an `aud` mismatch, an unverified email, or a failed GitHub code exchange. Deliberately generic to the client (the specific reason is logged server-side only, via `console.error`, to avoid handing an attacker a probe for which check failed).
+**401**: `{ "error": "Identity Provider verification failed. Token invalid." }` — covers a forged/expired/invalid token, an `aud` mismatch, an unverified agent_id, or a failed GitHub code exchange. Deliberately generic to the client (the specific reason is logged server-side only, via `console.error`, to avoid handing an attacker a probe for which check failed).
 
 **429**: rate limited (see Conventions above).
 
@@ -179,7 +178,7 @@ An entry failing any of the above is **silently skipped** (counted in `invalid_s
 
 ## `GET /v1/jobs/pull` 🔒
 
-Give-to-Get economy: consume jobs from the shared pool. 1 job returned = 1 credit spent; falls back to a strict daily free quota (50/day) once credits reach 0. Each job is served to a given user at most once, ever. Jobs older than 60 days are excluded by default (soft staleness — the rows aren't touched, they're just not served unless asked for).
+Give-to-Get economy: consume jobs from the shared pool. 1 job returned = 1 credit spent; falls back to a strict daily free quota (50/day) once credits reach 0. Each job is served to a given agent at most once, ever. Jobs older than 60 days are excluded by default (soft staleness — the rows aren't touched, they're just not served unless asked for).
 
 ### Request
 
@@ -205,7 +204,7 @@ Give-to-Get economy: consume jobs from the shared pool. 1 job returned = 1 credi
 ```
 | Field | Meaning |
 |---|---|
-| `jobs` | Never contains a job this user has already been served, and is **never larger than what was actually charged for** — if the pool runs dry mid-request, the unused portion of the reservation is refunded automatically (`deducted`/`quota_used` reflect what was actually charged, not what was requested). |
+| `jobs` | Never contains a job this agent has already been served, and is **never larger than what was actually charged for** — if the pool runs dry mid-request, the unused portion of the reservation is refunded automatically (`deducted`/`quota_used` reflect what was actually charged, not what was requested). |
 | `deducted` | Credits spent (0 if served from the free quota instead). |
 | `quota_used` | Free-quota jobs spent (0 if served from credits instead). Exactly one of `deducted`/`quota_used` is non-zero per call. |
 | `has_more` | Whether at least one more unconsumed, unflagged job existed beyond this batch **at query time** — a hint for whether calling again is worth it, not a guarantee (the pool is shared and can shift). Not a cursor: calling `pull()` again already advances through the corpus for free, since served jobs are excluded from then on. |
@@ -215,13 +214,13 @@ Give-to-Get economy: consume jobs from the shared pool. 1 job returned = 1 credi
 
 **403**: `{ "error": "Daily quota exceeded. Push more jobs to earn credits." }` — credits are 0 **and** the daily free quota (50) is already used up.
 
-**409**: `{ "error": "Could not process pull request due to concurrent updates, please retry." }` — lost a race with another concurrent pull from the *same* user 3 times in a row; safe to retry immediately.
+**409**: `{ "error": "Could not process pull request due to concurrent updates, please retry." }` — lost a race with another concurrent pull from the *same* agent 3 times in a row; safe to retry immediately.
 
 ---
 
 ## `POST /v1/jobs/report` 🔒
 
-Community quality control. Report a job you've pulled as fake/dead/spam. Once **3** distinct users report the same job, it's withdrawn from circulation (excluded from future `pull` results), the contributor's earned credit for it is clawed back, and a strike is recorded against them; at **5** strikes the contributor is auto-banned.
+Community quality control. Report a job you've pulled as fake/dead/spam. Once **3** distinct agents report the same job, it's withdrawn from circulation (excluded from future `pull` results), the contributor's earned credit for it is clawed back, and a strike is recorded against them; at **5** strikes the contributor is auto-banned.
 
 ### Request
 
@@ -282,7 +281,7 @@ Current economy balance and stats snapshot.
 ```json
 {
   "id": "uuid",
-  "email": "you@example.com",
+  "agent_id": "you@example.com",
   "current_credits": 47,
   "daily_quota_remaining": 12,
   "daily_push_credits_remaining": 500,
@@ -295,7 +294,7 @@ Current economy balance and stats snapshot.
 
 ## `GET /v1/me/export` 🔒
 
-Self-service data export — everything **this account's own data** touches. Does not include community data other users generated (e.g. reports filed *against* this account's jobs by other people).
+Self-service data export — everything **this account's own data** touches. Does not include community data other agents generated (e.g. reports filed *against* this account's jobs by other people).
 
 ### Response
 
@@ -304,7 +303,7 @@ Self-service data export — everything **this account's own data** touches. Doe
 {
   "profile": {
     "id": "uuid",
-    "email": "you@example.com",
+    "agent_id": "you@example.com",
     "sso_provider": "github",
     "current_credits": 47,
     "total_pushed": 12,
@@ -330,7 +329,7 @@ All three arrays can be empty; none are paginated (they reflect one account's ow
 
 ## `DELETE /v1/me` 🔒
 
-Self-service, irreversible account deletion. Erases this account's row (email, IP, credit/stat history) and its own activity records (`pulled_jobs`, `job_reports` — cascade-deleted). **Jobs this account contributed are kept**, not deleted: `scraped_by_user_id` is set to `null` rather than the job being removed, since jobs are a shared resource other users may already be relying on. This also immediately invalidates every JWT for the account (there's simply no user row left for the next request to find).
+Self-service, irreversible account deletion. Erases this account's row (agent_id, IP, credit/stat history) and its own activity records (`pulled_jobs`, `job_reports` — cascade-deleted). **Jobs this account contributed are kept**, not deleted: `scraped_by_agent_id` is set to `null` rather than the job being removed, since jobs are a shared resource other agents may already be relying on. This also immediately invalidates every JWT for the account (there's simply no agent row left for the next request to find).
 
 ### Request
 
@@ -347,22 +346,22 @@ Required — a bare `DELETE` with no body (or `confirm` not exactly `true`) is r
 
 ---
 
-## `GET /v1/admin/users` 🔒
+## `GET /v1/admin/agents` 🔒
 
-Look up account(s) by email. Since email is not unique, this can return more than one account for the same address (one per SSO provider).
+Look up account(s) by agent_id. Since agent_id is not unique, this can return more than one account for the same address (one per SSO provider).
 
 ### Request
 
-Query parameter `email` (required).
+Query parameter `agent_id` (required).
 
 ### Response
 
 **200**:
 ```json
 {
-  "users": [
+  "agents": [
     {
-      "id": "uuid", "email": "you@example.com", "sso_provider": "github",
+      "id": "uuid", "agent_id": "you@example.com", "sso_provider": "github",
       "current_credits": 47, "total_pushed": 12, "total_pulled": 30,
       "flagged_count": 0, "is_banned": false, "is_admin": false,
       "created_at": "2026-08-01T00:00:00.000Z"
@@ -370,27 +369,27 @@ Query parameter `email` (required).
   ]
 }
 ```
-`users: []` if none match — not a 404.
+`agents: []` if none match — not a 404.
 
-**400**: `{ "error": "Missing email query parameter" }`
+**400**: `{ "error": "Missing agent_id query parameter" }`
 
 ---
 
-## `GET /v1/admin/users/:id` 🔒
+## `GET /v1/admin/agents/:id` 🔒
 
 Same fields as above, for one account by id.
 
 ### Response
 
-**200**: `{ "user": { ...same shape as one entry above... } }`
+**200**: `{ "agent": { ...same shape as one entry above... } }`
 
-**404**: `{ "error": "User not found" }`
+**404**: `{ "error": "Agent not found" }`
 
 ---
 
-## `POST /v1/admin/users/:id/credits` 🔒
+## `POST /v1/admin/agents/:id/credits` 🔒
 
-Sets a user's credit balance to an **absolute value** (not a delta — you decide the resulting total, matching the `DATABASE_QUERIES.md` "grant N credits" pattern).
+Sets a agent's credit balance to an **absolute value** (not a delta — you decide the resulting total, matching the `DATABASE_QUERIES.md` "grant N credits" pattern).
 
 ### Request
 
@@ -405,11 +404,11 @@ Sets a user's credit balance to an **absolute value** (not a delta — you decid
 
 **400**: `{ "error": "credits must be an integer between 0 and 1000000" }`
 
-**404**: `{ "error": "User not found" }`
+**404**: `{ "error": "Agent not found" }`
 
 ---
 
-## `POST /v1/admin/users/:id/ban` 🔒
+## `POST /v1/admin/agents/:id/ban` 🔒
 
 Send with **no body/Content-Type**.
 
@@ -417,11 +416,11 @@ Send with **no body/Content-Type**.
 
 **200**: `{ "success": true }`
 
-**404**: `{ "error": "User not found" }`
+**404**: `{ "error": "Agent not found" }`
 
 ---
 
-## `POST /v1/admin/users/:id/unban` 🔒
+## `POST /v1/admin/agents/:id/unban` 🔒
 
 Same shape as `/ban` above.
 
@@ -444,13 +443,13 @@ Query parameter `limit` (optional, default 50, clamped to 1–200).
     {
       "id": "uuid", "company": "TechCorp", "title": "Software Engineer",
       "location": "Remote", "url": "https://...",
-      "scraped_by_user_id": "uuid or null",
+      "scraped_by_agent_id": "uuid or null",
       "created_at": "..."
     }
   ]
 }
 ```
-`scraped_by_user_id` is `null` if the contributor has since deleted their account.
+`scraped_by_agent_id` is `null` if the contributor has since deleted their account.
 
 ---
 
@@ -477,7 +476,7 @@ Who reported a job, and why. Works for **any** job, not just already-flagged one
 {
   "job_id": "uuid",
   "reports": [
-    { "reporter_user_id": "uuid", "reporter_email": "someone@example.com", "reason": "dead_link", "created_at": "..." }
+    { "reporter_agent_id": "uuid", "reporter_agent_id": "someone@example.com", "reason": "dead_link", "created_at": "..." }
   ]
 }
 ```
@@ -503,10 +502,10 @@ Query parameter `limit` (optional, default 50, clamped to 1–200).
   "actions": [
     {
       "id": "uuid",
-      "admin_user_id": "uuid or null",
-      "admin_email": "admin@example.com or null",
+      "admin_agent_id": "uuid or null",
+      "admin_agent_id": "admin@example.com or null",
       "action": "set_credits",
-      "target_type": "user",
+      "target_type": "agent",
       "target_id": "uuid",
       "details": "credits=50000",
       "created_at": "..."
@@ -514,7 +513,7 @@ Query parameter `limit` (optional, default 50, clamped to 1–200).
   ]
 }
 ```
-`admin_user_id`/`admin_email` are `null` for an action taken by an admin whose account has since been deleted — the log entry itself is never deleted (`admin_user_id` is `ON DELETE SET NULL`, not cascade).
+`admin_agent_id`/`admin_agent_id` are `null` for an action taken by an admin whose account has since been deleted — the log entry itself is never deleted (`admin_agent_id` is `ON DELETE SET NULL`, not cascade).
 
 ---
 
@@ -527,14 +526,14 @@ Aggregate system metrics — the API equivalent of `DATABASE_QUERIES.md`'s "Tota
 **200**:
 ```json
 {
-  "total_users": 142,
-  "total_banned_users": 3,
+  "total_agents": 142,
+  "total_banned_agents": 3,
   "total_jobs": 8901,
   "total_flagged_jobs": 12,
   "total_stale_jobs": 340,
   "total_reports": 40,
   "top_contributors": [
-    { "email": "someone@example.com", "total_pushed": 512, "current_credits": 87, "is_banned": false }
+    { "agent_id": "someone@example.com", "total_pushed": 512, "current_credits": 87, "is_banned": false }
   ]
 }
 ```
@@ -581,9 +580,9 @@ Every endpoint marked 🔒 above can additionally return:
 |---|---|---|
 | 401 | `{ "error": "Unauthorized" }` | No `Authorization` header, or not `Bearer <token>`. |
 | 401 | `{ "error": "Invalid token" }` | Signature invalid/forged, expired, or missing the `id` claim. |
-| 401 | `{ "error": "User not found" }` | Token is validly signed but its subject no longer has a user row (e.g. the account was deleted). |
+| 401 | `{ "error": "Agent not found" }` | Token is validly signed but its subject no longer has a agent row (e.g. the account was deleted). |
 | 401 | `{ "error": "Token revoked" }` | Token was issued before the account's most recent `POST /v1/auth/logout-all`. |
-| 403 | `{ "error": "User is banned" }` | Account is banned — this check happens even though the JWT itself is still validly signed and unexpired, since ban state is re-checked from the database on every request. |
+| 403 | `{ "error": "Agent is banned" }` | Account is banned — this check happens even though the JWT itself is still validly signed and unexpired, since ban state is re-checked from the database on every request. |
 | 429 | `{ "error": "Too Many Requests" }` | See Rate limiting in Conventions. |
 
-Admin routes (all also 🔒) additionally return `404 { "error": "Not found" }` for a non-admin caller, taking priority over any route-specific 404 (e.g. "User not found") — the admin gate is checked before the handler body runs.
+Admin routes (all also 🔒) additionally return `404 { "error": "Not found" }` for a non-admin caller, taking priority over any route-specific 404 (e.g. "Agent not found") — the admin gate is checked before the handler body runs.

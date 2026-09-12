@@ -6,20 +6,26 @@
   },
   "item": [
     {
-      "name": "0. API Info",
+      "name": "1. Register Anonymous Agent",
       "request": {
-        "method": "GET",
+        "method": "POST",
         "header": [],
         "url": {
-          "raw": "{{base_url}}/",
+          "raw": "{{base_url}}/v1/agent/register",
           "host": [
             "{{base_url}}"
           ],
           "path": [
-            ""
+            "v1",
+            "agent",
+            "register"
           ]
         },
-        "description": "Unauthenticated. Basic metadata and links — not part of the versioned API surface."
+        "description": "Simulates a new agent registering anonymously. Automatically saves the returned JWT.",
+        "body": {
+          "mode": "raw",
+          "raw": ""
+        }
       },
       "response": []
     },
@@ -140,7 +146,7 @@
             }
           ]
         },
-        "description": "Pulls the latest jobs and deducts credits. Requires JWT token. Jobs older than 60 days are excluded by default — add &include_stale=true to the URL to include them."
+        "description": "Pulls the latest jobs and deducts credits. Requires JWT token. Jobs older than 60 days are excluded by default \u2014 add &include_stale=true to the URL to include them."
       },
       "response": []
     },
@@ -257,7 +263,7 @@
             "logout-all"
           ]
         },
-        "description": "Invalidates every JWT previously issued to this account, including the one used to call this. Deliberately sent with no body/Content-Type — an empty JSON body would be rejected by Fastify before the handler runs."
+        "description": "Invalidates every JWT previously issued to this account, including the one used to call this. Deliberately sent with no body/Content-Type \u2014 an empty JSON body would be rejected by Fastify before the handler runs."
       },
       "response": []
     },
@@ -332,7 +338,7 @@
     },
     {
       "name": "Admin",
-      "description": "Requires the calling account to have is_admin = true (no self-service way to set this — see DATABASE_QUERIES.md). Use {{admin_jwt_token}}, obtained by logging in as an admin account via request #1 and copying its token here. A non-admin gets 404 from all of these, not 403.",
+      "description": "Requires the calling account to have is_admin = true (no self-service way to set this \u2014 see DATABASE_QUERIES.md). Use {{admin_jwt_token}}, obtained by logging in as an admin account via request #1 and copying its token here. A non-admin gets 404 from all of these, not 403.",
       "item": [
         {
           "name": "Look Up Users By Email",
@@ -636,7 +642,7 @@
                 }
               ]
             },
-            "description": "Every write made through /v1/admin/* — who did what, when."
+            "description": "Every write made through /v1/admin/* \u2014 who did what, when."
           },
           "response": []
         },
@@ -691,10 +697,10 @@
       "description": "Token for an account with is_admin = true. Log in as that account via request #1 and paste its token here (or reuse jwt_token if the same account is both)."
     },
     {
-      "key": "target_user_id",
+      "key": "target_agent_id",
       "value": "",
       "type": "string",
-      "description": "UUID of the user an Admin request acts on."
+      "description": "UUID of the agent an Admin request acts on."
     },
     {
       "key": "target_job_id",
